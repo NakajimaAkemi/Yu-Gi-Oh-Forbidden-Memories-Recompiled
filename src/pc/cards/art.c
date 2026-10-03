@@ -40,6 +40,8 @@
 #include <string.h>
 #ifdef _WIN32
 #include "pc/platform/win32.h"
+#elif defined(__ANDROID__)
+#include "pc/platform/android_fonts.h"
 #else
 #include <fontconfig/fontconfig.h>
 #endif
@@ -667,6 +669,8 @@ static const char *serif_file(void)
 {
 #ifdef _WIN32
     return Win32_SerifFontPath();
+#elif defined(__ANDROID__)
+    return Android_FontPath(ANDROID_FONT_SERIF);
 #else
     static char path[1024];
     FcPattern *pattern, *match;

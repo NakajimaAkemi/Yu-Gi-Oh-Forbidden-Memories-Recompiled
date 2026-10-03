@@ -16,6 +16,7 @@
 #else
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <ucontext.h>
 #endif
 
@@ -36,10 +37,15 @@ static unsigned char *low_memory;
  * Windows holds the others (see there). */
 static unsigned char low_piece_mapped[MEMORIES_GUEST_RAM_SIZE / 0x10000u];
 #endif
+#if defined(__i386__)
+/* The x86 repair in flight: the register pointed at `low_memory` while the
+ * one faulting instruction is single-stepped. The ARM handler performs the
+ * transfer itself and needs none of this (see on_fault). */
 static struct {
     int active, reg; /* reg: the ModRM register number, 0 (EAX) to 7 (EDI) */
     uint32_t original, patched;
 } low_fixup;
+#endif
 
 static void report_low_access(uint32_t eip, uint32_t address)
 {
@@ -61,6 +67,7 @@ static void report_low_access(uint32_t eip, uint32_t address)
     (void)!write(2, text, (size_t)length);
 }
 
+#if defined(__i386__)
 /* Which register (ModRM number) does the faulting instruction address memory
  * through? -1 for none. */
 #define REGISTER_ESI 6
@@ -93,6 +100,7 @@ static int low_access_register(const unsigned char *code, uint32_t esi)
     }
     return (int)base;
 }
+#endif /* __i386__ */
 
 /* Tables in the retail data image hold MIPS function addresses, and native
  * code calls through them. The build generates Memories_FunctionMap (guest
@@ -403,6 +411,7 @@ static int map_at(uint32_t address, size_t length, int fd, off_t offset)
     return 0;
 }
 
+#if defined(__i386__)
 /* ModRM/SIB register numbers to gregs[]. */
 static const int register_slot[8] = {REG_EAX, REG_ECX, REG_EDX, REG_EBX, REG_ESP, REG_EBP, REG_ESI, REG_EDI};
 
@@ -455,6 +464,132 @@ static void on_fault(int number, siginfo_t *info, void *context)
     Crash_HandleSignal(number, info, context);
 }
 
+#elif defined(__arm__)
+/* 32-bit ARM (Android) has no indirect-branch thunks -- the compiler offers
+ * nothing like -mindirect-branch=thunk-extern there (branch_thunks.c) -- so
+ * this is the only way into a native function from a pointer the retail data
+ * image holds, and it carries the traffic the thunks take on x86. Guest RAM
+ * is mapped without PROT_EXEC, so the call faults on its first instruction
+ * and lands here.
+ *
+ * The redirect is exact on ARM in a way it is not on x86: AAPCS leaves the
+ * return address in lr, which the faulting call already set, so moving pc to
+ * the native function gives it the frame a direct call would. Nothing is
+ * pushed, popped or realigned.
+ *
+ * An access below 0x10000 is repaired differently from the i386 handler's
+ * way. That one points the instruction's base register at `low_memory` and
+ * single-steps it with the trap flag; ARM has no trap flag, so the one
+ * faulting load or store is performed here instead and pc stepped past it.
+ * It needs no second signal and leaves no window in which the register holds
+ * the patched value. Only A32 encodings are decoded, which is all the build
+ * produces (-marm). */
+
+/* The registers of the faulting context: struct sigcontext holds r0-r10,
+ * fp, ip, sp, lr and pc as consecutive words, which is the order they
+ * number in. */
+static unsigned long *context_registers(ucontext_t *user)
+{
+    return &user->uc_mcontext.arm_r0;
+}
+
+/* Perform the faulting A32 load or store against `low_memory` and step over
+ * it. si_addr is the effective address the instruction computed, so only the
+ * transfer itself has to be decoded -- and the offset only when the
+ * instruction writes the base register back. Returns 0 for an encoding this
+ * does not cover, which is then reported as a fault. */
+static int emulate_low_access(ucontext_t *user, uint32_t address)
+{
+    unsigned long *reg = context_registers(user);
+    uint32_t code = *(const uint32_t *)(uintptr_t)user->uc_mcontext.arm_pc;
+    unsigned char *at = low_memory + address;
+    unsigned rt = (code >> 12) & 0xfu, rn = (code >> 16) & 0xfu;
+    unsigned load = (code >> 20) & 1u, pre = (code >> 24) & 1u, up = (code >> 23) & 1u;
+    unsigned writeback = pre ? (code >> 21) & 1u : 1u;
+    unsigned size, sign_extend = 0;
+    uint32_t offset = 0;
+    if (rt == 15u || rn == 15u) {
+        return 0; /* pc as the data or the base: not one of these sites */
+    }
+    if ((code & 0x0c000000u) == 0x04000000u) { /* LDR, LDRB, STR, STRB */
+        size = (code & (1u << 22)) ? 1u : 4u;
+        if (code & (1u << 25)) { /* scaled register offset */
+            if (writeback && (code & 0xff0u) != 0) {
+                return 0; /* a shifted offset written back: not decoded */
+            }
+            offset = (uint32_t)reg[code & 0xfu];
+        } else {
+            offset = code & 0xfffu;
+        }
+    } else if ((code & 0x0e000090u) == 0x00000090u && (code & 0x60u) != 0) {
+        /* LDRH, STRH, LDRSB, LDRSH: the offset is split either side of the
+         * shape bits, and bit 22 picks immediate over register. */
+        unsigned shape = (code >> 5) & 3u;
+        size = (shape == 1u) ? 2u : ((code & (1u << 20)) && shape == 2u ? 1u : 2u);
+        sign_extend = load && shape != 1u;
+        if (code & (1u << 22)) {
+            offset = ((code >> 4) & 0xf0u) | (code & 0xfu);
+        } else {
+            offset = (uint32_t)reg[code & 0xfu];
+        }
+    } else {
+        return 0; /* not a single load or store: block transfer, VFP, swap */
+    }
+    if (load) {
+        uint32_t value = 0;
+        memcpy(&value, at, size);
+        if (sign_extend && size == 1u) {
+            value = (uint32_t)(int32_t)(int8_t)value;
+        } else if (sign_extend && size == 2u) {
+            value = (uint32_t)(int32_t)(int16_t)value;
+        }
+        reg[rt] = value;
+    } else {
+        uint32_t value = (uint32_t)reg[rt];
+        memcpy(at, &value, size);
+    }
+    if (writeback) {
+        reg[rn] = pre ? address : (up ? address + offset : address - offset);
+    }
+    user->uc_mcontext.arm_pc += 4;
+    return 1;
+}
+static void on_fault(int number, siginfo_t *info, void *context)
+{
+    ucontext_t *user = context;
+    uint32_t address = (uint32_t)(uintptr_t)info->si_addr;
+    uint32_t pc = (uint32_t)user->uc_mcontext.arm_pc;
+    void *target;
+    if (pc == address && (target = guest_call_target(address)) != NULL) {
+        user->uc_mcontext.arm_pc = (unsigned long)(uintptr_t)target;
+        return;
+    }
+    if (address < 0x10000u && pc != address && low_memory) {
+        report_low_access(pc, address);
+        if (emulate_low_access(user, address)) {
+            return;
+        }
+    }
+    report_guest_fault(address, pc);
+    Crash_HandleSignal(number, info, context);
+}
+#else
+#error "no guest fault handler for this architecture"
+#endif
+
+/* The shared file the guest RAM mirrors are views of. bionic only declares
+ * memfd_create from API 30 and this build targets older Android, so the
+ * syscall is made directly; the kernel has had it since 3.17, well below
+ * anything that runs this. */
+static int memories_ram_fd(void)
+{
+#if defined(__ANDROID__)
+    return (int)syscall(__NR_memfd_create, "memories-ram", 0u);
+#else
+    return memfd_create("memories-ram", 0);
+#endif
+}
+
 int Memories_GuestMap(void)
 {
     struct sigaction action;
@@ -468,9 +603,11 @@ int Memories_GuestMap(void)
     action.sa_sigaction = on_fault;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
     sigaction(SIGSEGV, &action, NULL);
+#if defined(__i386__)
     action.sa_sigaction = on_step;
     sigaction(SIGTRAP, &action, NULL);
-    fd = memfd_create("memories-ram", 0);
+#endif
+    fd = memories_ram_fd();
     if (fd < 0 || ftruncate(fd, MEMORIES_GUEST_RAM_SIZE) != 0) {
         perror("guest RAM");
         return -1;

@@ -115,4 +115,49 @@ __asm__(".text\n"
         THUNK(esi, "%esi")
         THUNK(edi, "%edi")
         THUNK(ebp, "(%ebp)"));
+#elif defined(__arm__)
+
+/* 32-bit ARM (Android) has no counterpart of -mindirect-branch=thunk-extern,
+ * so there are no compiler thunks here: guest RAM is mapped without
+ * PROT_EXEC (image.c), an indirect call through a pointer the retail data
+ * image holds faults on its first instruction, and on_fault sends it to the
+ * native function. That is the i386 port's "second net" doing the whole job,
+ * and it is exact on ARM in a way it is not on x86: the return address is
+ * already in lr, so redirecting pc leaves the callee's frame as a direct
+ * call would. The cost is a signal per call through a guest pointer, which
+ * only the retail tables take (text opcode handlers, overlay callbacks).
+ *
+ * A module function that C calls by name is pinned to its guest address, so
+ * that call is direct and nothing would fault: the build gives each such name
+ * a host stub that loads the address into r12 and enters the entry below
+ * (tools/pc/build_game32.py, write_guest_branches).
+ *
+ * The contract of the i386 thunks holds: every register is kept but r12 (ip,
+ * call-clobbered) and the flags, which are dead at an indirect call, and the
+ * stack is as it was with lr still the caller's, so the native function or
+ * Memories_MipsThunk starts exactly as it would from a direct call. The six
+ * pushed registers keep sp 8-byte aligned for the resolver call, as AAPCS
+ * wants. The resolver's own address comes off the literal pool as a link-time
+ * offset (see state_arm.S) so that no text relocation is left behind. */
+__asm__(".text\n"
+        "    .arm\n"
+        "    .globl Memories_GuestBranchDirect\n"
+        "    .type Memories_GuestBranchDirect, %function\n"
+        "Memories_GuestBranchDirect:\n"
+        "    push {r0-r3, r12, lr}\n"
+        "    ldr r1, .Lresolver_offset\n"
+        ".Lresolver_pc:\n"
+        "    add r1, pc, r1\n"
+        "    ldr r1, [r1]\n"
+        "    cmp r1, #0\n"
+        "    beq 1f\n"
+        "    mov r0, r12\n"
+        "    blx r1\n"
+        /* The resolved target replaces the saved r12 that 1: pops. */
+        "    str r0, [sp, #16]\n"
+        "1:  pop {r0-r3, r12, lr}\n"
+        "    bx r12\n"
+        ".Lresolver_offset:\n"
+        "    .word Memories_GuestBranchResolver - (.Lresolver_pc + 8)\n"
+        "    .size Memories_GuestBranchDirect, . - Memories_GuestBranchDirect\n");
 #endif

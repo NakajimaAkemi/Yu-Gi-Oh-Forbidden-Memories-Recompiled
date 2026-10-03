@@ -33,8 +33,23 @@
 #include "pc/compat/posix.h"
 #ifdef _WIN32
 #include "pc/platform/win32.h"
+#endif
+/* Windows has no ucontext, and neither does Android: bionic never shipped
+ * getcontext, makecontext or swapcontext. Both reach the game's fixed stack
+ * through Memories_ContextSwitch (state_i386.S, state_arm.S) instead. */
+#if defined(_WIN32) || defined(__arm__)
+#define MEMORIES_OWN_CONTEXT 1
 #else
 #include <ucontext.h>
+#endif
+/* The frame Memories_ContextSwitch pops to enter a routine: the registers it
+ * keeps, then the return address it leaves with. */
+#if defined(__arm__)
+#define CONTEXT_WORDS 10 /* r4-r11, r12, lr */
+#define CONTEXT_RETURN 9
+#else
+#define CONTEXT_WORDS 6 /* edi, esi, ebx, ebp, the return into the routine, and the slot its own return takes */
+#define CONTEXT_RETURN 4
 #endif
 
 #ifdef _WIN32
@@ -82,9 +97,9 @@ struct MemoriesState {
 
 static Region *regions;
 static unsigned region_count;
-#ifdef _WIN32
-/* Windows has no ucontext. A context is the stack pointer of a suspended
- * Memories_ContextSwitch (state_i386.S), which keeps the callee-saved
+#ifdef MEMORIES_OWN_CONTEXT
+/* A context is the stack pointer of a suspended Memories_ContextSwitch
+ * (state_i386.S, state_arm.S), which keeps the callee-saved
  * registers on that stack. The thread's stack bounds and exception-handler
  * chain live in its TEB and must follow the stack, as fibers do: exceptions
  * raised on a stack outside those bounds cannot be dispatched. Bounds are
@@ -100,12 +115,13 @@ static unsigned region_count;
  * of the stack instead leaves no room to deliver the exception, and the
  * process just ends. */
 #define GUARD_ROOM 0x10000u
-void Memories_ContextSwitch(uint32_t *from_esp, const uint32_t *to_esp);
+void Memories_ContextSwitch(uint32_t *from_sp, const uint32_t *to_sp);
 static uint32_t service_context, game_context;
 static uint32_t process_bounds[4];
 static const uint32_t game_bounds[4] = {0xffffffffu, STACK_TOP, STACK_BASE, /* no handlers */
                                         STACK_BASE + GUARD_ROOM + 0x1000u};
 
+#ifdef _WIN32
 static void save_stack_bounds(uint32_t *bounds)
 {
     __asm__ volatile("movl %%fs:0, %0\n\tmovl %%fs:4, %1\n\tmovl %%fs:8, %2\n\tmovl %%fs:0xe0c, %3"
@@ -119,6 +135,14 @@ static void set_stack_bounds(const uint32_t *bounds)
                      : "r"(bounds[0]), "r"(bounds[1]), "r"(bounds[2]), "r"(bounds[3])
                      : "memory");
 }
+
+#else
+/* Only Windows dispatches exceptions against the thread's recorded stack
+ * bounds, so on Android there is nothing to move with the stack. */
+#define save_stack_bounds(bounds) ((void)(bounds))
+#define set_stack_bounds(bounds) ((void)(bounds))
+#define Win32_GuardStack(base, room) ((void)0)
+#endif
 
 static void leave_game_stack(void)
 {
@@ -136,6 +160,20 @@ static void resume_game(void)
 }
 #else
 static ucontext_t service_context, game_context;
+#endif
+
+/* The frame a context starts on, inside the room `top` leaves below it. */
+#ifdef MEMORIES_OWN_CONTEXT
+static uint32_t *context_frame(uint32_t top, void (*routine)(void))
+{
+    uint32_t *frame = (uint32_t *)(uintptr_t)(top - 64);
+    unsigned i;
+    for (i = 0; i < CONTEXT_WORDS; i++) {
+        frame[i] = 0;
+    }
+    frame[CONTEXT_RETURN] = (uint32_t)(uintptr_t)routine;
+    return frame;
+}
 #endif
 static int (*game_entry)(void);
 static int game_result;
@@ -510,7 +548,7 @@ static void serialize(MemoriesState *state)
     }
     subsystems(state);
     {
-        MemoriesStateField fields[] = {{(void *)(uintptr_t)entry.esp, STACK_TOP - entry.esp}};
+        MemoriesStateField fields[] = {{(void *)(uintptr_t)entry.sp, STACK_TOP - entry.sp}};
         Memories_StateChunk(state, "stack", fields, 1);
     }
     Spu_Hold(0);
@@ -595,7 +633,7 @@ static void apply(void)
     chunk = find_chunk(&state, "entry", &size);
     memcpy(&entry, chunk, sizeof(entry));
     chunk = find_chunk(&state, "stack", &size);
-    memcpy((void *)(uintptr_t)entry.esp, chunk, size);
+    memcpy((void *)(uintptr_t)entry.sp, chunk, size);
     free(pending_image);
     pending_image = NULL;
     Spu_Hold(0);
@@ -607,21 +645,18 @@ static void apply(void)
     }
     fprintf(stderr, "memories-pc: state loaded\n");
     hold_signals(0);
-#ifdef _WIN32
+#ifdef MEMORIES_OWN_CONTEXT
     set_stack_bounds(game_bounds);
     {
         /* Into the game through a context switch, as its first run went, so
          * that the service context is taken again here. The one taken
          * before kept its registers on this stack, where apply has run since:
-         * the next load would resume from those (EBP 0, a return into the
-         * middle of Memories_StateRunGame). The switch lands in resume_game
-         * on the game stack, below what the state restored there. */
-        uint32_t *frame = (uint32_t *)(uintptr_t)(entry.esp - 64);
-        frame[0] = frame[1] = frame[2] = frame[3] = 0;
-        frame[4] = (uint32_t)(uintptr_t)resume_game;
-        frame[5] = 0;
+         * the next load would resume from those (a zeroed frame returning
+         * into the middle of Memories_StateRunGame). The switch lands in
+         * resume_game on the game stack, below what the state restored
+         * there. */
         resume_entry = entry;
-        game_context = (uint32_t)(uintptr_t)frame;
+        game_context = (uint32_t)(uintptr_t)context_frame(entry.sp, resume_game);
         Memories_ContextSwitch(&service_context, &game_context);
     }
 #else
@@ -880,7 +915,7 @@ static int load(const char *path)
         return -1;
     }
     memcpy(&entry, chunk, sizeof(entry));
-    if (entry.esp >= OTHER_STACK_BASE && entry.esp < OTHER_STACK_BASE + STACK_SIZE) {
+    if (entry.sp >= OTHER_STACK_BASE && entry.sp < OTHER_STACK_BASE + STACK_SIZE) {
         /* The state holds the game stack, return addresses into the game code
          * as the other system's compiler laid it out: nothing here to resume. */
         refuse("%s was saved by the %s build; a state loads only in a build for the system that saved it", path,
@@ -889,7 +924,7 @@ static int load(const char *path)
         return -1;
     }
     chunk = find_chunk(&state, "stack", &size);
-    if (!chunk || entry.esp < STACK_BASE || entry.esp >= STACK_TOP || size != STACK_TOP - entry.esp ||
+    if (!chunk || entry.sp < STACK_BASE || entry.sp >= STACK_TOP || size != STACK_TOP - entry.sp ||
         !find_chunk(&state, "memory", &size) || size != MEMORIES_GUEST_RAM_SIZE + SCRATCHPAD_SIZE) {
         refuse("%s: damaged state", path);
         free(image);
@@ -911,7 +946,7 @@ static int load(const char *path)
     pending_image = image;
     pending_size = (size_t)length;
     /* Leave the game stack; the service context applies the state. */
-#ifdef _WIN32
+#ifdef MEMORIES_OWN_CONTEXT
     leave_game_stack();
 #else
     swapcontext(&game_context, &service_context);
@@ -922,10 +957,14 @@ static int load(const char *path)
 static int from_game_code(void)
 {
     uint32_t caller;
-    if (Memories_StateEntry.esp < STACK_BASE || Memories_StateEntry.esp >= STACK_TOP) {
+    if (Memories_StateEntry.sp < STACK_BASE || Memories_StateEntry.sp >= STACK_TOP) {
         return 0;
     }
-    caller = *(const uint32_t *)(uintptr_t)Memories_StateEntry.esp;
+#if defined(__arm__)
+    caller = Memories_StateEntry.lr; /* AAPCS keeps it in a register */
+#else
+    caller = *(const uint32_t *)(uintptr_t)Memories_StateEntry.sp;
+#endif
     return caller >= (uintptr_t)__start_game_text && caller < (uintptr_t)__stop_game_text;
 }
 
@@ -1045,8 +1084,8 @@ uint32_t Memories_StateBuildId(void)
 static void run_game(void)
 {
     game_result = game_entry();
-#ifdef _WIN32
-    leave_game_stack(); /* what uc_link does on Linux */
+#ifdef MEMORIES_OWN_CONTEXT
+    leave_game_stack(); /* what uc_link does where there is a ucontext */
 #endif
 }
 
@@ -1088,15 +1127,12 @@ int Memories_StateRunGame(int (*entry)(void))
         }
     }
     game_entry = entry;
-#ifdef _WIN32
+#ifdef MEMORIES_OWN_CONTEXT
     {
-        /* What Memories_ContextSwitch pops: EDI ESI EBX EBP, then the return
-         * into run_game, whose own return address is never used. */
-        uint32_t *top = (uint32_t *)(uintptr_t)(STACK_TOP - 64);
-        top[0] = top[1] = top[2] = top[3] = 0;
-        top[4] = (uint32_t)(uintptr_t)run_game;
-        top[5] = 0;
-        game_context = (uint32_t)(uintptr_t)top;
+        /* context_frame lays out what Memories_ContextSwitch pops: the
+         * callee-saved registers, then the return into run_game, whose own
+         * return address is never used. */
+        game_context = (uint32_t)(uintptr_t)context_frame(STACK_TOP, run_game);
         Win32_GuardStack(STACK_BASE, GUARD_ROOM);
         save_stack_bounds(process_bounds);
         set_stack_bounds(game_bounds);

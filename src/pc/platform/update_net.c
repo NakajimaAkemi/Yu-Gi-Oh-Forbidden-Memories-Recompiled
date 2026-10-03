@@ -92,6 +92,22 @@ int UpdateNet_Get(const char *url, int timeout_seconds, UpdateNetSink sink, void
     return result;
 }
 
+#elif defined(__ANDROID__)
+
+/* No check on Android. There is no curl program to spawn (and bionic only
+ * has posix_spawn from API 28), and an app does not replace itself: a new
+ * version arrives as an APK the player installs. update_check.c treats this
+ * as any other failed check and says nothing more about it. */
+int UpdateNet_Get(const char *url, int timeout_seconds, UpdateNetSink sink, void *context, char *why, size_t why_size)
+{
+    (void)url;
+    (void)timeout_seconds;
+    (void)sink;
+    (void)context;
+    say(why, why_size, "no update check on Android");
+    return -1;
+}
+
 #else
 
 int UpdateNet_Get(const char *url, int timeout_seconds, UpdateNetSink sink, void *context, char *why, size_t why_size)

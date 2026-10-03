@@ -17,6 +17,7 @@
 #include "controls_window.h"
 #include "controls_linux.h"
 #include "quit_prompt.h"
+#include "touch_pad.h"
 #include "host_actions.h"
 #include "settings.h"
 #include "pc/audio/spu.h"
@@ -947,6 +948,7 @@ static void relayout(void)
         canvas.width = window_w;
         canvas.height = window_h;
         canvas.alpha = 1;
+        TouchPad_Draw(&canvas);
         Menu_Draw(&canvas);
         if (use_gl) {
             glBindTexture(GL_TEXTURE_2D, gl_overlay);
@@ -1093,10 +1095,32 @@ static void gl_quad(GLuint texture, float x, float y, float w, float h)
     gl_quad_part(texture, x, y, w, h, 0, 0, 1, 1);
 }
 
+/* Grow x,y,w,h to take in another rectangle; an empty one changes nothing. */
+static void union_bounds(int *x, int *y, int *w, int *h, int ox, int oy, int ow, int oh)
+{
+    int x1, y1;
+    if (!ow || !oh) return;
+    if (!*w || !*h) {
+        *x = ox;
+        *y = oy;
+        *w = ow;
+        *h = oh;
+        return;
+    }
+    x1 = *x + *w > ox + ow ? *x + *w : ox + ow;
+    y1 = *y + *h > oy + oh ? *y + *h : oy + oh;
+    *x = *x < ox ? *x : ox;
+    *y = *y < oy ? *y : oy;
+    *w = x1 - *x;
+    *h = y1 - *y;
+}
+
 static void draw_overlay(int *x, int *y, int *w, int *h)
 {
     int hx, hy, hw, hh;
     FusionHelper_Viewport((int)layout.dst.x, (int)layout.dst.y, (int)layout.dst.w, (int)layout.dst.h);
+    /* The on-screen pad goes under everything else: a dropdown opens over it. */
+    TouchPad_Draw(&canvas);
     if (Settings_Get(SET_SHOW_HUD) == 2 || Menu_IsOpen()) {
         Hud_Draw(&canvas);
         Menu_Draw(&canvas); /* dropdowns stay above the full statistics panel */
@@ -1106,15 +1130,9 @@ static void draw_overlay(int *x, int *y, int *w, int *h)
     }
     Menu_Bounds(x, y, w, h);
     Hud_Bounds(&hx, &hy, &hw, &hh);
-    if (!*w || !*h) { *x = hx; *y = hy; *w = hw; *h = hh; return; }
-    if (hw && hh) {
-        int x1 = *x + *w > hx + hw ? *x + *w : hx + hw;
-        int y1 = *y + *h > hy + hh ? *y + *h : hy + hh;
-        *x = *x < hx ? *x : hx;
-        *y = *y < hy ? *y : hy;
-        *w = x1 - *x;
-        *h = y1 - *y;
-    }
+    union_bounds(x, y, w, h, hx, hy, hw, hh);
+    TouchPad_Bounds(&hx, &hy, &hw, &hh);
+    union_bounds(x, y, w, h, hx, hy, hw, hh);
 }
 
 static void show(void)
@@ -1397,6 +1415,9 @@ static void pump(void)
             break;
         case SDL_EVENT_WINDOW_FOCUS_LOST:
             if(!controls_window)ControlsRuntime_ResetKeys(); mouse_bits=wheel_now=0;wheel_frames=0;
+            /* A button held as the app goes away must not stay held. */
+            TouchPad_Release();
+            menu_dirty = 1;
             if (Settings_Get(SET_MUTE_ON_FOCUS_LOSS)) Spu_SetOutputVolume(0);
             if (Settings_Get(SET_PAUSE_ON_FOCUS_LOSS) && Platform_ClockRate() != 0) {
                 /* Turbo ends with the focus (the keys are let go), so
@@ -1417,8 +1438,21 @@ static void pump(void)
                 focus_paused = 0;
             }
             break;
-        case SDL_EVENT_GAMEPAD_ADDED: open_gamepad(event.gdevice.which); break;
-        case SDL_EVENT_GAMEPAD_REMOVED: close_gamepad(event.gdevice.which); break;
+        /* The on-screen pad gives way to a real one and comes back with it,
+         * so either way the overlay has to be painted again. */
+        case SDL_EVENT_GAMEPAD_ADDED: open_gamepad(event.gdevice.which); menu_dirty = 1; break;
+        case SDL_EVENT_GAMEPAD_REMOVED: close_gamepad(event.gdevice.which); menu_dirty = 1; break;
+        case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_CANCELED: {
+            /* SDL reports a finger's place as a fraction of the window. */
+            int down = event.type == SDL_EVENT_FINGER_DOWN || event.type == SDL_EVENT_FINGER_MOTION;
+            if (TouchPad_Finger((int64_t)event.tfinger.fingerID, down,
+                                (int)(event.tfinger.x * (float)layout.win_w),
+                                (int)(event.tfinger.y * (float)layout.win_h))) {
+                menu_dirty = 1;
+            }
+            break;
+        }
         case SDL_EVENT_MOUSE_BUTTON_DOWN: case SDL_EVENT_MOUSE_BUTTON_UP:
             if (event.button.y >= Menu_Height() && menu_event.button >= 2 && menu_event.button <= 3) {
                 mouse_bits = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN
@@ -1488,11 +1522,21 @@ static void pump(void)
 static void create_window(const char *title)
 {
     update_menu_scale(240 * scale + 26 * Menu_AutoScale(240 * scale));
+#ifdef __ANDROID__
+    /* Android's GL is GLES, which the presenter here is not written for
+     * (render/gl_none.c): take the SDL_Render path from the start rather than
+     * make a context nothing can draw through. */
+    window = NULL;
+    gl_context = NULL;
+    use_gl = 0;
+    {
+#else
     window = SDL_CreateWindow(title, 320 * scale, 240 * scale + Menu_Height(),
                               SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_OPENGL);
     gl_context = window ? SDL_GL_CreateContext(window) : NULL;
     use_gl = gl_context != NULL;
     if (!use_gl) {
+#endif
         if (window) SDL_DestroyWindow(window);
         window = SDL_CreateWindow(title, 320 * scale, 240 * scale + Menu_Height(),
                                   SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
@@ -1844,7 +1888,8 @@ void Platform_PumpEvents(void)
 
 uint16_t Platform_Pad(int port)
 {
-    return port == 0 ? (uint16_t)(ControlsRuntime_Keyboard() | (ControlsRuntime_Blocked()?0:(mouse_bits | wheel_now)) | scripted_bits | Gamepad_Bits(0))
+    return port == 0 ? (uint16_t)(ControlsRuntime_Keyboard() | TouchPad_Bits() |
+                                  (ControlsRuntime_Blocked()?0:(mouse_bits | wheel_now)) | scripted_bits | Gamepad_Bits(0))
                      : (uint16_t)(Gamepad_Bits(1) | scripted_bits2);
 }
 

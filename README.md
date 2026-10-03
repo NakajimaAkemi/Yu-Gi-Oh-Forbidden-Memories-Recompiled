@@ -36,6 +36,20 @@ launch, pick your USA disc's `.bin`. The game can tell you when a newer release 
 **From source:** put the `.bin` in `game/` and run `play.bat` or `./play.sh`. The first
 run builds everything (Linux needs `gcc` and `python3`). See [PC build](notes/pc-build.md).
 
+### Android
+
+There is an Android build too, as an APK for `armeabi-v7a` (32-bit ARM, which
+is what the port's memory model needs; [Android build](notes/android-build.md)
+explains why, and what a 64-bit one would take). It has an on-screen pad and
+takes a real controller, and the disc image goes in the folder the app makes
+at `Android/data/com.yfm.redecomp/files/game`.
+
+```sh
+python3 tools/pc/build_android_deps.py            # once: the NDK, the SDK, SDL3
+python3 tools/pc/build_game32.py --target android
+python3 tools/pc/build_apk.py                     # tmp/pc/android/memories.apk
+```
+
 **Languages:** `languages/*.txt` is the text of the five European releases, read off the
 PAL discs by the port itself. With the discs in `game/pal`, `python3 tools/pc/export_languages.py`
 writes them again, and `--check` compares them ([Translations](notes/translation.md),
@@ -86,7 +100,7 @@ _Generated from `config/slus_01411/functions.csv` and `config/slus_01411/overlay
 
 [Modding](notes/modding.md) · [More cards](notes/more-cards.md) · [Fusion helper](notes/fusion-helper.md) ·
 [Card drops](notes/card-drops.md) · [Card packs](notes/card-packs.md) · [Translations](notes/translation.md) · [Updates](notes/updates.md) · [Setup](notes/setup.md) · [Build](notes/build.md) ·
-[Releases](notes/pc-release.md)
+[Android build](notes/android-build.md) · [Releases](notes/pc-release.md)
 
 ## Community
 

@@ -16,6 +16,16 @@
 /* ELF32, as far as a relocatable i386 object needs it. */
 #define ET_REL 1
 #define EM_386 3
+#define EM_ARM 40
+/* A mod's object is host machine code, so it must be this build's machine:
+ * x86 for the PC game, ARM for the Android one. */
+#if defined(__arm__)
+#define EM_HOST EM_ARM
+#define EM_HOST_NAME "32-bit ARM code"
+#else
+#define EM_HOST EM_386
+#define EM_HOST_NAME "32-bit x86 code"
+#endif
 #define SHT_PROGBITS 1
 #define SHT_SYMTAB 2
 #define SHT_STRTAB 3
@@ -108,7 +118,7 @@ static int read_sections(Loader *loader)
     if (loader->file_size < 52 || memcmp(file, "\177ELF", 4)) return fail(loader, "is not an ELF object file");
     if (file[4] != 1 || file[5] != 1) return fail(loader, "is not a 32-bit little-endian ELF object");
     if (u16(file + 16) != ET_REL) return fail(loader, "is not a relocatable object (.o); build it with tools/pc/build_mod.py");
-    if (u16(file + 18) != EM_386) return fail(loader, "is not 32-bit x86 code");
+    if (u16(file + 18) != EM_HOST) return fail(loader, "is not " EM_HOST_NAME);
     section_offset = u32(file + 32);
     loader->section_count = u16(file + 48);
     names_index = u16(file + 50);

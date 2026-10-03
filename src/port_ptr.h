@@ -8,9 +8,16 @@
  * G32 to nothing, CALL32(type, f) to f and PSXLONG to long. The
  * preprocessed tokens, and therefore the objects, are unchanged.
  *
- * A native 64-bit port (MEMORIES_PC, clang for x86-64 or AArch64, built
- * with -fms-extensions) keeps the game's data at its retail addresses, so
- * structures and pinned globals must keep their 32-bit layout:
+ * A native 64-bit port (MEMORIES_PC, clang for x86-64, built with
+ * -fms-extensions) keeps the game's data at its retail addresses, so
+ * structures and pinned globals must keep their 32-bit layout.
+ *
+ * x86-64 only: clang implements __ptr32 through the x86 address spaces, and
+ * on AArch64 it parses and is ignored, with no "attribute ignored" warning --
+ * every G32 below would silently widen to 8 bytes and every guest structure's
+ * layout would be wrong. The #error further down stops that build rather than
+ * let it compile. Android is therefore 32-bit ARM, where the pointers are
+ * already 4 bytes and none of this is needed (notes/android-build.md).
  *
  *   G32     follows the '*' of a pointer the game stores in memory: a
  *           structure or union member, or a global pinned to a retail
@@ -29,8 +36,11 @@
  *           `int` in a native LP64 build.
  */
 
-#if defined(MEMORIES_PC) && defined(__clang__) && \
-    (defined(__x86_64__) || defined(__aarch64__))
+#if defined(MEMORIES_PC) && defined(__aarch64__)
+#error "no 32-bit guest pointer on AArch64: clang ignores __ptr32 there, so every G32 structure would be laid out wrong (notes/android-build.md)"
+#endif
+
+#if defined(MEMORIES_PC) && defined(__clang__) && defined(__x86_64__)
 #define G32 __ptr32 __uptr
 #define CALL32(type, pointer) ((type)(pointer))
 #else

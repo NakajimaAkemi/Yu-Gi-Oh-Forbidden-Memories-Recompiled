@@ -203,7 +203,11 @@ static void on_alarm(int number, siginfo_t *info, void *context)
     ucontext_t *user = context;
     (void)number;
     (void)info;
+#if defined(__arm__)
+    on_tick((uintptr_t)user->uc_mcontext.arm_pc, context);
+#else
     on_tick((uintptr_t)user->uc_mcontext.gregs[REG_EIP], context);
+#endif
 }
 #endif
 

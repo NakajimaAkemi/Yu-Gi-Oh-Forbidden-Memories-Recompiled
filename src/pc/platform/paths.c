@@ -78,7 +78,17 @@ static void directory_of(char *path)
 const char *Paths_ProgramDir(void)
 {
     ssize_t length;
+    const char *named = getenv("MEMORIES_PROGRAM_DIR");
     if (program_dir[0]) return program_dir;
+    /* Android has no program directory to find: the game is a library inside
+     * an APK, and /proc/self/exe is the runtime that loaded it. The activity
+     * unpacks what the release would have shipped and names the folder here
+     * (MemoriesActivity.java). Elsewhere it is an override like
+     * MEMORIES_USER_DIR's. */
+    if (named && *named) {
+        snprintf(program_dir, sizeof(program_dir), "%s", named);
+        return program_dir;
+    }
     length = readlink("/proc/self/exe", program_dir, sizeof(program_dir) - 1);
     if (length > 0 && (size_t)length < sizeof(program_dir)) {
         program_dir[length] = '\0';

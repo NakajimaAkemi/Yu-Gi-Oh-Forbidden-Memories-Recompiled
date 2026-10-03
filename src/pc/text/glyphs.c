@@ -9,7 +9,11 @@
 #ifdef _WIN32
 #include "pc/platform/win32.h"
 #else
+#if defined(__ANDROID__)
+#include "pc/platform/android_fonts.h"
+#else
 #include <fontconfig/fontconfig.h>
+#endif
 #endif
 #include <stdio.h>
 #include <stdlib.h>
@@ -186,6 +190,8 @@ static void open_system_face(void)
     system_tried = 1;
 #ifdef _WIN32
     open_face(Win32_FontPath(0));
+#elif defined(__ANDROID__)
+    open_face(Android_FontPath(ANDROID_FONT_BOLD));
 #else
     {
         FcPattern *pattern, *match;

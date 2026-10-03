@@ -19,7 +19,11 @@
 #include "pc/platform/win32.h"
 #include <windows.h>
 #else
+#if defined(__ANDROID__)
+#include "pc/platform/android_fonts.h"
+#else
 #include <fontconfig/fontconfig.h>
+#endif
 #include <iconv.h>
 #endif
 #include <stdint.h>
@@ -67,6 +71,12 @@ static uint32_t sjis_to_unicode(unsigned code)
 #else
 static void open_face(void)
 {
+#if defined(__ANDROID__)
+    const char *file = Android_FontPath(ANDROID_FONT_CJK);
+    face_tried = 1;
+    if (!file || FT_Init_FreeType(&library)) return;
+    if (FT_New_Face(library, file, 0, &face) == 0) {
+#else
     FcPattern *pattern, *match;
     FcResult result;
     FcChar8 *file = NULL;
@@ -78,14 +88,17 @@ static void open_face(void)
     match = FcFontMatch(NULL, pattern, &result);
     if (match && FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch &&
         FT_New_Face(library, (const char *)file, 0, &face) == 0) {
+#endif
         /* 15 rows including descenders: an em of 14 leaves a pixel of air. */
         FT_Set_Pixel_Sizes(face, 0, 14);
         LOG(LOG_WINDOW, "kanji ROM glyphs from %s", (const char *)file);
     } else {
         face = NULL;
     }
+#if !defined(__ANDROID__)
     if (match) FcPatternDestroy(match);
     FcPatternDestroy(pattern);
+#endif
 }
 
 static uint32_t sjis_to_unicode(unsigned code)

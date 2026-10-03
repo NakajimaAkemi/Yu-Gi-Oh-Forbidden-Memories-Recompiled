@@ -44,7 +44,14 @@ void Memories_StateRemapRange(MemoriesState *state, uint32_t from, uint32_t to, 
 
 /* Registers on entry to VSync, written by the assembly entry (state_i386.S). */
 typedef struct MemoriesStateEntry {
-    uint32_t ebx, esi, edi, ebp, esp; /* esp points at the return address */
+#if defined(__arm__)
+    /* AAPCS (state_arm.S): r4-r11 are callee-saved and the return address is
+     * in lr rather than on the stack, so sp is the frame itself and lr is
+     * kept beside it. */
+    uint32_t r4, r5, r6, r7, r8, r9, r10, r11, sp, lr;
+#else
+    uint32_t ebx, esi, edi, ebp, sp; /* sp points at the return address */
+#endif
 } MemoriesStateEntry;
 extern MemoriesStateEntry Memories_StateEntry;
 

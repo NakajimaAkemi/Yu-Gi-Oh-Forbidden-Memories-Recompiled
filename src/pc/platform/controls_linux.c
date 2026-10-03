@@ -1,5 +1,7 @@
-#ifndef __linux__
-/* Off Linux SDL identifies controllers itself: no evdev identity. */
+#if !defined(__linux__) || defined(__ANDROID__)
+/* Off Linux SDL identifies controllers itself: no evdev identity. Android is
+ * Linux but gives an app no access to /dev/input, and SDL names the pads it
+ * opens through the Java layer, so it takes this path too. */
 #include "pc/compat/fs.h"
 #include "controls_linux.h"
 int ControlsLinux_Identity(const char *path, char *identity, unsigned capacity)

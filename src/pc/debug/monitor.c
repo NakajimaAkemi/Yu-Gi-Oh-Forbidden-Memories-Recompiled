@@ -23,7 +23,17 @@
 #include "crash.h"
 #include "symbols.h"
 #include "pc/platform/paths.h"
+#if defined(__i386__) || defined(__x86_64__)
 #include <cpuid.h>
+#endif
+/* Android starts an app as a single process: there is no second copy of the
+ * executable to exec as the watcher, and no ptrace over another process. The
+ * game there always runs alone, which is what MEMORIES_NO_MONITOR asks for
+ * elsewhere; the shared block below is then this process's own and the facts
+ * and the log tail still reach the reports. */
+#ifndef __ANDROID__
+#define MEMORIES_MONITOR 1
+#endif
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -43,6 +53,7 @@
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/ptrace.h>
+#include <sys/syscall.h>
 #include <sys/resource.h>
 #include <sys/sysinfo.h>
 #include <sys/uio.h>
@@ -127,6 +138,27 @@ static void read_file_line(const char *relative, char *out, size_t size)
 
 static void cpu_name(char *out, size_t size)
 {
+#if !defined(__i386__) && !defined(__x86_64__)
+    /* No cpuid: the kernel names the part instead. "Hardware" is the board
+     * on ARM, which is the useful line in a report; "model name" is what
+     * other architectures put there. */
+    FILE *info = fopen("/proc/cpuinfo", "r");
+    char line[256];
+    snprintf(out, size, "unknown");
+    if (!info) return;
+    while (fgets(line, sizeof(line), info)) {
+        const char *colon;
+        if (strncmp(line, "Hardware", 8) != 0 && strncmp(line, "model name", 10) != 0) continue;
+        colon = strchr(line, ':');
+        if (!colon) continue;
+        for (colon++; *colon == ' ' || *colon == '\t'; colon++) {
+        }
+        snprintf(out, size, "%s", colon);
+        out[strcspn(out, "\r\n")] = '\0';
+        break;
+    }
+    fclose(info);
+#else
     unsigned words[12], highest = 0, unused, i;
     char *start;
     snprintf(out, size, "unknown");
@@ -136,6 +168,7 @@ static void cpu_name(char *out, size_t size)
     start[47] = '\0';
     while (*start == ' ') start++;
     snprintf(out, size, "%s", start);
+#endif
 }
 
 void Monitor_NoteSystem(void)
@@ -421,8 +454,13 @@ static int remote_read(uintptr_t address, void *buffer, size_t size)
     SIZE_T got = 0;
     return ReadProcessMemory(game_process, (LPCVOID)address, buffer, size, &got) && got == size ? 0 : -1;
 #else
+#ifdef MEMORIES_MONITOR
     struct iovec local = {buffer, size}, remote = {(void *)address, size};
     return process_vm_readv(game, &local, 1, &remote, 1, 0) == (ssize_t)size ? 0 : -1;
+#else
+    (void)address; (void)buffer; (void)size;
+    return -1; /* nothing to read: no monitor process (see the top) */
+#endif
 #endif
 }
 
@@ -605,6 +643,12 @@ static const char *syscall_name(long number)
 
 static int thread_registers(pid_t tid, uintptr_t *eip, uintptr_t *esp, uintptr_t *ebp)
 {
+#ifndef MEMORIES_MONITOR
+    /* PTRACE_GETREGS fills a structure named per architecture, and only the
+     * monitor ever asks for a thread's registers. */
+    (void)tid; (void)eip; (void)esp; (void)ebp;
+    return -1;
+#else
     struct user_regs_struct registers;
     int status;
     if (ptrace(PTRACE_SEIZE, tid, 0, 0)) return -1;
@@ -638,6 +682,7 @@ static int thread_registers(pid_t tid, uintptr_t *eip, uintptr_t *esp, uintptr_t
             return 0;
         }
     }
+#endif
 }
 
 static void proc_text(pid_t tid, const char *what, char *text, size_t size)
@@ -1257,9 +1302,21 @@ static void forward(int number)
 
 /* -1: no monitor, or this is the game: go on as the game. 0: the game ran
  * and ended, *exit_status. */
+/* The shared block's backing file. bionic only declares memfd_create from
+ * API 30, and this builds against an older one, so the syscall is made
+ * directly (image.c does the same). */
+static int monitor_memfd(void)
+{
+#if defined(__ANDROID__)
+    return (int)syscall(__NR_memfd_create, "memories-monitor", 0u);
+#else
+    return memfd_create("memories-monitor", 0);
+#endif
+}
+
 static int run_monitor(int *exit_status)
 {
-    int fd = memfd_create("memories-monitor", 0), pipe_fds[2], status = 0;
+    int fd = monitor_memfd(), pipe_fds[2], status = 0;
     MonitorShared *block;
     struct sigaction action;
     char text[16];
@@ -1396,6 +1453,10 @@ int Monitor_Main(int argc, char **argv, int *status)
 {
     (void)argc;
     (void)argv;
+#ifndef MEMORIES_MONITOR
+    (void)status;
+    return 0; /* always the game, never a watcher (see the top) */
+#endif
     if (attach() || !wanted()) return 0;
     return !run_monitor(status);
 }

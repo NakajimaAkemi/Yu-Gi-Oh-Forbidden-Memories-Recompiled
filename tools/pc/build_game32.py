@@ -30,16 +30,41 @@ ADDRESSES = "config/pc/guest_addresses.txt"
 TARGET = next((sys.argv[i + 1] for i, word in enumerate(sys.argv[:-1]) if word == "--target"),
               os.environ.get("MEMORIES_TARGET") or ("windows" if sys.platform == "win32" else "linux"))
 WINDOWS = TARGET == "windows"
+ANDROID = TARGET == "android"
 WIN32_DEPS = "tmp/pc/win32-deps"  # tools/pc/build_win32_deps.py
-CC, OBJCOPY, NM, READELF, OBJDUMP = (("i686-w64-mingw32-clang", "llvm-objcopy", "llvm-nm", "llvm-readelf", "llvm-objdump")
-                                     if WINDOWS else ("gcc", "objcopy", "nm", "readelf", "objdump"))
+# --target android builds the game as one shared library for 32-bit ARM, the
+# library an APK loads (notes/android-build.md). 32-bit ARM is the port's
+# architecture there because the memory model is ILP32: guest RAM sits at its
+# retail addresses and the game's structures hold 32-bit pointers, which
+# armeabi-v7a gives natively and arm64 does not -- clang's __ptr32 (src/port_ptr.h)
+# is an x86 extension that AArch64 silently ignores. tools/pc/build_android_deps.py
+# fetches the NDK and the SDK and builds SDL3, FreeType and libpng into
+# tmp/pc/android-deps; ANDROID_NDK and ANDROID_HOME are honoured when set.
+ANDROID_DEPS = os.environ.get("MEMORIES_ANDROID_DEPS") or "tmp/pc/android-deps"
+# API 28 (Android 9) is the floor: bionic gained iconv there, which the
+# kanji ROM's Shift-JIS conversion needs (src/pc/sdk/libapi_krom.c), and
+# posix_spawn, and every device with 32-bit support is well past it.
+# memfd_create arrived later still and is called as a syscall instead.
+ANDROID_API = 28
+ANDROID_ABI = "armeabi-v7a"
+ANDROID_NDK = os.environ.get("ANDROID_NDK") or f"{ANDROID_DEPS}/ndk"
+ANDROID_BIN = f"{ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+if WINDOWS:
+    CC, OBJCOPY, NM, READELF, OBJDUMP = ("i686-w64-mingw32-clang", "llvm-objcopy", "llvm-nm",
+                                         "llvm-readelf", "llvm-objdump")
+elif ANDROID:
+    CC = f"{ANDROID_BIN}/armv7a-linux-androideabi{ANDROID_API}-clang"
+    OBJCOPY, NM, READELF, OBJDUMP = (f"{ANDROID_BIN}/llvm-objcopy", f"{ANDROID_BIN}/llvm-nm",
+                                     f"{ANDROID_BIN}/llvm-readelf", f"{ANDROID_BIN}/llvm-objdump")
+else:
+    CC, OBJCOPY, NM, READELF, OBJDUMP = ("gcc", "objcopy", "nm", "readelf", "objdump")
 PREFIX = "_" if WINDOWS else ""  # C symbol names in the object files
 # Linux builds are made against Debian 11's libraries
 # (tools/pc/build_linux_sysroot.py fetches them), not this machine's: the
 # executable then asks for glibc 2.29 rather than whatever is installed here,
 # and runs on other people's Linux as well. FreeType, fontconfig and libpng
 # are linked in. The one a developer runs is the one that is shared.
-PORTABLE = not WINDOWS
+PORTABLE = not WINDOWS and not ANDROID
 if PORTABLE:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_linux_sysroot
@@ -70,6 +95,27 @@ if WINDOWS:
     # (Visual Studio, WinDbg, Superluminal) read; they do not read DWARF.
     CFLAGS = [f for f in CFLAGS if f not in ("-m32", "-fno-pie")] + ["-Wno-incompatible-pointer-types", "-mno-ms-bitfields",
                                                                     "-gcodeview"]
+elif ANDROID:
+    # -fPIC and no -fno-pie: the result is a shared library, which Android
+    # loads at an address of its choosing. The pinned retail addresses
+    # survive that because they are absolute symbols a linker script defines
+    # and the version script keeps local, so they are folded into the GOT at
+    # link time with no relocation left for the loader (see the link below).
+    # -marm throughout rather than Thumb: the guest glue reaches its own
+    # globals with `add rN, pc, rN` (src/pc/guest/state_arm.S), which A32 has
+    # and Thumb-2 does not, and one instruction set spares every generated
+    # stub an interworking veneer.
+    # -fvisibility=hidden is what makes those link-time offsets possible, and
+    # keeps the game's 40,000 symbols out of the dynamic table.
+    # -fpermissive is GCC's; clang wants the narrower flag, as on Windows.
+    # Dropped: -fpatchable-function-entry, which clang implements for x86 and
+    # AArch64 but not for 32-bit ARM. Nothing in the library then has the
+    # patch room src/pc/mods/hooks.c needs, so a code mod cannot hook a game
+    # function on Android; data mods (cards, textures, music, tables) are
+    # unaffected.
+    CFLAGS = [f for f in CFLAGS if f not in ("-m32", "-fno-pie", "-fpermissive",
+                                             "-fpatchable-function-entry=8,6")] + [
+        "-fPIC", "-marm", "-fvisibility=hidden", "-Wno-incompatible-pointer-types"]
 # -O0 for game units: original busy-waits poll non-volatile globals that the
 # VBlank handler updates, and must not be hoisted out of their loops.
 NATIVE_CFLAGS = ["-m32", "-std=gnu11", "-O2", "-g", "-Wall", "-fno-pie", "-fno-omit-frame-pointer", "-fno-strict-aliasing",
@@ -87,13 +133,25 @@ if WINDOWS:
         f"-I{WIN32_DEPS}/sdl/include", f"-I{WIN32_DEPS}/include", f"-I{WIN32_DEPS}/include/freetype2",
         "-mno-ms-bitfields",  # the game's structures, shared with native code (see CFLAGS)
         "-gcodeview"]
+elif ANDROID:
+    # _FILE_OFFSET_BITS=64 stays: bionic's 32-bit stat and readdir overflow on
+    # a large inode number just as glibc's do, and the disc image is read
+    # from shared storage.
+    NATIVE_CFLAGS = [f for f in NATIVE_CFLAGS if f not in ("-m32", "-fno-pie", "-I/usr/include/freetype2",
+                                                           "-Wno-builtin-declaration-mismatch")] + [
+        "-fPIC", "-marm", "-fvisibility=hidden",
+        f"-I{ANDROID_DEPS}/include", f"-I{ANDROID_DEPS}/include/freetype2",
+        f"-I{ANDROID_DEPS}/sdl/include"]
 # Every unit's indirect calls and jumps go through __x86_indirect_thunk_<reg>
 # (src/pc/guest/branch_thunks.c), which sends a target in guest memory to its
 # native function: tables in the retail data image hold MIPS addresses, and
 # a call through one must not depend on DEP faulting it (notes/pc-build.md).
 # clang also turns switch jump tables into compare trees; GCC jumps through
 # the thunk for those, which lets a host target straight through.
-BRANCH_THUNKS = (["-mretpoline-external-thunk"] if WINDOWS else
+# 32-bit ARM has no counterpart of either flag, so the Android build has no
+# thunks: guest RAM is mapped without PROT_EXEC and the fault handler does
+# the whole job there (src/pc/guest/branch_thunks.c, image.c).
+BRANCH_THUNKS = ([] if ANDROID else ["-mretpoline-external-thunk"] if WINDOWS else
                  ["-mindirect-branch=thunk-extern", "-mindirect-branch-register"])
 CFLAGS = CFLAGS + BRANCH_THUNKS
 NATIVE_CFLAGS = NATIVE_CFLAGS + BRANCH_THUNKS
@@ -106,12 +164,21 @@ if PORTABLE:
 # (see notes/pc-build.md), else X11. --backend or MEMORIES_BACKEND picks.
 SDL_BUILD = "tmp/pc/sdl-m32-portable"   # build_linux_sysroot.py
 SDL_SOURCE = "tmp/pc/sdl-source/SDL3-3.4.16"
-BACKENDS = {"sdl": ["src/pc/platform/sdl.c", "src/pc/render/gl_picture.c", "src/pc/render/present_pass.c"],
+# Android presents through SDL_Render: both files below draw with the desktop
+# fixed-function pipeline, which GLES has never had, so a stand-in takes
+# their place there (src/pc/render/gl_none.c).
+BACKENDS = {"sdl": ["src/pc/platform/sdl.c"] + (["src/pc/render/gl_none.c"] if ANDROID else
+                    ["src/pc/render/gl_picture.c", "src/pc/render/present_pass.c"]),
             "x11": ["src/pc/platform/x11.c", "src/pc/platform/audio_alsa.c", "src/pc/platform/gamepad_evdev.c"]}
 BACKEND_SOURCES = sorted(sum(BACKENDS.values(), []))
-NATIVE = sorted(glob.glob("src/pc/guest/*.[cS]") + glob.glob("src/pc/sdk/*.c") +
+# The guest glue keeps one assembly file per architecture; the others are not
+# this build's (src/pc/guest/state_arm.S, state_i386.S).
+ARCH_GLUE = {"i386": ["src/pc/guest/setjmp_i386.S", "src/pc/guest/state_i386.S"],
+             "arm": ["src/pc/guest/setjmp_arm.S", "src/pc/guest/state_arm.S"]}
+OTHER_GLUE = set(sum(ARCH_GLUE.values(), [])) - set(ARCH_GLUE["arm" if ANDROID else "i386"])
+NATIVE = sorted([f for f in glob.glob("src/pc/guest/*.[cS]") if f not in OTHER_GLUE] + glob.glob("src/pc/sdk/*.c") +
                 [f for f in glob.glob("src/pc/platform/*.c") if f not in BACKEND_SOURCES] + glob.glob("src/pc/overlays/*.c") + glob.glob("src/pc/overrides/*.c") + glob.glob("src/pc/audio/*.c") + glob.glob("src/pc/mods/*.c") + glob.glob("src/pc/debug/*.c") + glob.glob("src/pc/cards/*.c") + glob.glob("src/pc/free_duel/*.c") + glob.glob("src/pc/saves/*.c") + glob.glob("src/pc/text/*.c") + ["src/pc/render/soft_gpu.c", "src/pc/render/texture_dump.c", "src/pc/render/texture_pack.c"]) + [
-    "src/pc/rng.c", "src/pc/compat/fs.c", "src/pc/compat/gte.c", "src/pc/compat/pgxp.c", "src/pc/compat/libgs_ot.c", "src/pc/render/packets.c"]
+    "src/pc/rng.c", "src/pc/compat/fs.c", "src/pc/compat/gte.c", "src/pc/compat/pgxp.c", "src/pc/compat/libgs_ot.c", "src/pc/compat/android_libc.c", "src/pc/render/packets.c"]
 # Same contract as the host C library, so the host's version is used directly.
 # Runtime-loaded modules linked into the executable: name, sources, identifier
 # word at the start of the image, and load bank. main_menu has its load address
@@ -295,8 +362,19 @@ def write_guest_branches(build, branches):
     branch thunks' resolver (src/pc/guest/branch_thunks.c)."""
     with open(f"{build}/guest_branches.c", "w") as handle:
         handle.write("/* Written by tools/pc/build_game32.py. */\nextern void Memories_GuestBranchDirect(void);\n")
-        handle.writelines(f'__asm__(".text\\n.globl {PREFIX}{name}\\n{PREFIX}{name}:\\n    pushl $0x{address:08X}\\n'
-                          f'    jmp {PREFIX}Memories_GuestBranchDirect\\n");\n' for name, address in sorted(branches.items()))
+        if ANDROID:
+            # movw/movt rather than a literal pool: the address is a plain
+            # number, so it needs no relocation and no .ltorg between stubs.
+            # r12 is where Memories_GuestBranchDirect reads it from, and is
+            # call-clobbered, so loading it here costs the caller nothing.
+            handle.writelines(f'__asm__(".text\\n.arm\\n.globl {name}\\n.type {name}, %function\\n{name}:\\n'
+                              f'    movw r12, #0x{address & 0xFFFF:04X}\\n'
+                              f'    movt r12, #0x{address >> 16:04X}\\n'
+                              f'    b Memories_GuestBranchDirect\\n");\n'
+                              for name, address in sorted(branches.items()))
+        else:
+            handle.writelines(f'__asm__(".text\\n.globl {PREFIX}{name}\\n{PREFIX}{name}:\\n    pushl $0x{address:08X}\\n'
+                              f'    jmp {PREFIX}Memories_GuestBranchDirect\\n");\n' for name, address in sorted(branches.items()))
     run([CC, *NATIVE_CFLAGS, "-c", f"{build}/guest_branches.c", "-o", f"{build}/guest_branches.o"])
     return f"{build}/guest_branches.o"
 
@@ -506,9 +584,22 @@ def build_mods(build, release=False):
     # and a new key the compiler. Checked against this build's own export
     # table: the other system's may be older than this build. Written where
     # the manifest's "library" puts it, which may be a subdirectory.
-    with concurrent.futures.ThreadPoolExecutor(max(1, len(mods))) as pool:
-        objects = list(pool.map(lambda mod: build_mod.build(mod[1], out_dir=mod[2], games=[build], quiet=True),
-                                mods))
+    if ANDROID:
+        # A mod's code is an object the game links in at load (object_loader.c),
+        # so it has to be the game's own machine code, and tools/pc/build_mod.py
+        # only builds x86. Nothing here would hook a game function anyway:
+        # 32-bit ARM has no -fpatchable-function-entry, so there is no patch
+        # room in the library (src/pc/mods/hooks.c, and see CFLAGS above).
+        # The Android build therefore carries each mod's data and leaves its
+        # code out, rather than ship an object the loader would refuse.
+        objects = [None] * len(mods)
+        for _, _, out_dir in mods:
+            for stale in glob.glob(f"{out_dir}/*.o"):
+                os.remove(stale)
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max(1, len(mods))) as pool:
+            objects = list(pool.map(lambda mod: build_mod.build(mod[1], out_dir=mod[2], games=[build], quiet=True),
+                                    mods))
     built = []
     for (name, source_dir, out_dir), obj in zip(mods, objects):
         if not obj:
@@ -609,13 +700,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=list(BACKENDS), default=os.environ.get("MEMORIES_BACKEND") or
                         "sdl")
-    parser.add_argument("--target", choices=("linux", "windows"), default=TARGET)
+    parser.add_argument("--target", choices=("linux", "windows", "android"), default=TARGET)
     parser.add_argument("--release", action="store_true",
                         help="Windows GUI executable; omit the optional disc-derived executable icon")
     # A Windows build made on Linux gets a directory of its own, so both
     # executables and their objects sit side by side.
     parser.add_argument("--build", default="tmp/pc/win32" if WINDOWS and sys.platform != "win32" else
-                        "tmp/pc/game32")
+                        "tmp/pc/android" if ANDROID else "tmp/pc/game32")
     options = parser.parse_args()
     NATIVE.extend(BACKENDS[options.backend])
     NATIVE.sort()
@@ -627,6 +718,12 @@ def main():
             build_win32_deps.main()   # the first build: the Windows libraries
         if not shutil.which(CC):
             sys.exit(f"{CC} is not on PATH (llvm-mingw)")
+    elif ANDROID:
+        if options.backend != "sdl":
+            sys.exit("Android builds use the SDL backend")
+        for needed in (CC, f"{ANDROID_DEPS}/sdl/lib/libSDL3.so", f"{ANDROID_DEPS}/lib/libfreetype.a"):
+            if not os.path.exists(needed):
+                sys.exit(f"{needed} is missing: run tools/pc/build_android_deps.py")
     else:
         # The Debian libraries and SDL3, fetched and built the first time.
         build_linux_sysroot.main()
@@ -735,7 +832,10 @@ def main():
         run([OBJCOPY, "--rename-section=.text=game_text", "--rename-section=.rodata=game_rodata",
              "--rename-section=.data=game_data", "--rename-section=.sdata=game_data",
              "--rename-section=.bss=game_bss", "--rename-section=.sbss=game_bss", obj(source)])
-    fixed = dict(FIXED_SECTIONS) if not WINDOWS else {}
+    # A shared library's sections cannot be placed at chosen addresses any
+    # more than a PE's can, so Android gives up the same thing Windows does:
+    # save states are not carried across rebuilds of the game units.
+    fixed = dict(FIXED_SECTIONS) if not WINDOWS and not ANDROID else {}
     for index, (name, _, _, bank) in enumerate(module for module in MODULES if module[3] and not WINDOWS):
         fixed[f"ovl_{name}_data"] = MODULE_SECTIONS + index * 0x400000
         fixed[f"ovl_{name}_bss"] = MODULE_SECTIONS + index * 0x400000 + 0x200000
@@ -909,7 +1009,9 @@ def main():
     write_mod_exports(options.build, game_defined | native_defined | tentative | set(pinned) | set(branches) | set(stubs),
                       aliases)
     version = write_version(options.build, force=not ours)
-    output = f"{options.build}/memories-pc"
+    # Android loads a shared library, not an executable; the activity names
+    # it (getMainSharedObject) and SDL's glue looks SDL_main up in it.
+    output = f"{options.build}/libmemories.so" if ANDROID else f"{options.build}/memories-pc"
     if WINDOWS:
         output += ".exe"
         resources = exe_resources(options.build, options.release)
@@ -937,6 +1039,30 @@ def main():
              f"{WIN32_DEPS}/sdl/lib/libSDL3.dll.a", "-lopengl32", f"{WIN32_DEPS}/lib/libfreetype.a",
              f"{WIN32_DEPS}/lib/libpng16.a", f"{WIN32_DEPS}/lib/libzs.a", "-ldbghelp", "-lwinhttp", "-lws2_32", "-static", "-lpthread"])
         shutil.copy(f"{WIN32_DEPS}/sdl/bin/SDL3.dll", options.build)
+    elif ANDROID:
+        # The pins go in as an input script, as on Linux: a plain assignment
+        # overrides a game unit's tentative definition of the same name,
+        # which PROVIDE_HIDDEN would not. The version script then keeps every
+        # one of them local, which is what makes them work in a library the
+        # loader places where it likes -- a local absolute symbol is folded
+        # into the GOT at link time, where a global one would leave an
+        # R_ARM_GLOB_DAT for the loader to resolve by symbol lookup and bias.
+        # It also leaves the dynamic table holding only SDL_main.
+        # -z noexecstack and no text relocations: Android rejects both.
+        # FreeType and libpng are linked in; zlib, GLES and the log and
+        # native-activity libraries come with the system.
+        exports = f"{options.build}/exports.map"
+        with open(exports, "w") as handle:
+            handle.write("/* Written by tools/pc/build_game32.py. */\n")
+            handle.write("{ global: SDL_*; Java_*; local: *; };\n")
+        run([CC, "-shared", "-marm", "-o", output,
+             *[obj(s) for s in game + NATIVE],
+             f"{options.build}/stubs.o", guest_branches, f"{options.build}/mod_exports.o", version,
+             f"{options.build}/guest_symbols.ld", f"-Wl,--version-script={exports}",
+             "-Wl,-z,noexecstack", "-Wl,--no-undefined",
+             f"{ANDROID_DEPS}/sdl/lib/libSDL3.so",
+             f"{ANDROID_DEPS}/lib/libfreetype.a", f"{ANDROID_DEPS}/lib/libpng16.a",
+             "-lz", "-lGLESv2", "-lEGL", "-llog", "-landroid", "-lm", "-ldl"])
     else:
         # Mods bind through mod_exports.o, so nothing needs -rdynamic.
         # FreeType, fontconfig and libpng linked in, so the player needs no

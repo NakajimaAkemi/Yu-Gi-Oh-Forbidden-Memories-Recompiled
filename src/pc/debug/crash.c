@@ -105,6 +105,26 @@ static void walk(uintptr_t eip, uintptr_t ebp)
     }
 }
 
+#ifndef _WIN32
+/* The instruction, stack and frame pointers of a signal context, whose names
+ * differ by architecture: x86 indexes gregs[], 32-bit ARM has members of its
+ * own. The frames walk() follows are laid out the same either way -- clang
+ * for ARM pushes {r11, lr} and points r11 at the pair, as x86 does with ebp
+ * -- so only the three registers need picking out. */
+static void context_registers(const ucontext_t *user, uintptr_t *pc, uintptr_t *sp, uintptr_t *fp)
+{
+#if defined(__arm__)
+    *pc = (uintptr_t)user->uc_mcontext.arm_pc;
+    *sp = (uintptr_t)user->uc_mcontext.arm_sp;
+    *fp = (uintptr_t)user->uc_mcontext.arm_fp;
+#else
+    *pc = (uintptr_t)user->uc_mcontext.gregs[REG_EIP];
+    *sp = (uintptr_t)user->uc_mcontext.gregs[REG_ESP];
+    *fp = (uintptr_t)user->uc_mcontext.gregs[REG_EBP];
+#endif
+}
+#endif
+
 char Crash_ReportDir[512] = "tmp/pc";
 
 void Crash_ChooseReportDir(void)
@@ -215,10 +235,10 @@ void Crash_HandleSignal(int number, siginfo_t *info, void *context)
 {
     ucontext_t *user = context;
     struct sigaction action;
+    uintptr_t pc, sp, fp;
     if (reporting++) _exit(128 + number);
-    report_fatal("signal", (unsigned long)number, info ? (uintptr_t)info->si_addr : 0,
-                 (uintptr_t)user->uc_mcontext.gregs[REG_EIP], (uintptr_t)user->uc_mcontext.gregs[REG_ESP],
-                 (uintptr_t)user->uc_mcontext.gregs[REG_EBP]);
+    context_registers(user, &pc, &sp, &fp);
+    report_fatal("signal", (unsigned long)number, info ? (uintptr_t)info->si_addr : 0, pc, sp, fp);
     memset(&action, 0, sizeof(action));
     action.sa_handler = SIG_DFL;
     sigemptyset(&action.sa_mask);
@@ -300,10 +320,7 @@ void Crash_ReportHang(void *context_pointer)
 #ifdef _WIN32
     Win32_ContextRegisters(context_pointer, &eip, &esp, &ebp);
 #else
-    ucontext_t *user = context_pointer;
-    eip = (uintptr_t)user->uc_mcontext.gregs[REG_EIP];
-    esp = (uintptr_t)user->uc_mcontext.gregs[REG_ESP];
-    ebp = (uintptr_t)user->uc_mcontext.gregs[REG_EBP];
+    context_registers((const ucontext_t *)context_pointer, &eip, &esp, &ebp);
 #endif
     report_fd = -1;
     snprintf(path, sizeof(path), "%s/hang-%ld.txt", Crash_ReportDir, (long)getpid());

@@ -166,6 +166,14 @@ static void user_dir_fact(int writable, const char *why)
     else Monitor_Fact("user dir", "%s; writable: no: %s", Paths_UserDir(), why);
 }
 
+#ifdef __ANDROID__
+/* There is no process entry on Android: SDLActivity loads this library and
+ * calls SDL_main through JNI (SDL_android_main.c, and getMainSharedObject in
+ * the activity names the library). Including this renames main to SDL_main,
+ * which is the one symbol the library exports besides SDL's own. */
+#include <SDL3/SDL_main.h>
+#endif
+
 int main(int argc, char **argv)
 {
 #ifdef _WIN32

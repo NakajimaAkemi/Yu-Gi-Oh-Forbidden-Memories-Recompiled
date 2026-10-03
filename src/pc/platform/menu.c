@@ -36,7 +36,11 @@
 #ifdef _WIN32
 #include "win32.h"
 #else
+#if defined(__ANDROID__)
+#include "android_fonts.h"
+#else
 #include <fontconfig/fontconfig.h>
+#endif
 #endif
 #include "pc/debug/crash.h"
 #include "pc/text/glyphs.h"
@@ -408,6 +412,8 @@ static void load_font(void)
     FT_Face face;
 #ifdef _WIN32
     const char *file = Win32_FontPath(0);
+#elif defined(__ANDROID__)
+    const char *file = Android_FontPath(ANDROID_FONT_SANS);
 #else
     FcPattern *pattern, *match;
     FcResult result;
@@ -420,7 +426,7 @@ static void load_font(void)
     }
     free_extra_glyphs();
     font_loaded = 0;
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__ANDROID__)
     if (!file || FT_Init_FreeType(&library)) {
         return;
     }
@@ -446,7 +452,7 @@ static void load_font(void)
     font_ascent = (int)(face->size->metrics.ascender >> 6);
     font_descent = (int)(-face->size->metrics.descender >> 6);
     font_loaded = 1;
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__ANDROID__)
     FcPatternDestroy(pattern);
     FcPatternDestroy(match);
 #endif
