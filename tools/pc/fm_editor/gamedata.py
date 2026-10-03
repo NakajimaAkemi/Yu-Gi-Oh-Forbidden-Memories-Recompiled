@@ -59,7 +59,8 @@ TYPE_MAGIC, TYPE_TRAP, TYPE_RITUAL, TYPE_EQUIP = 20, 21, 22, 23
 # CARD_FUSION_GROUP_*, in that order).
 FUSION_GROUPS = ("AngelWinged", "Bugrothian", "Egg", "Elf", "FeatherFromBear", "FeatherFromHarpie",
                  "FeatherFromMachine", "Female", "Jar", "Koumorian", "MercuryMagicUser", "MercurySpellcaster",
-                 "Mirror", "MusKingian", "MystElfian", "Rainbow", "Sheepian", "Thronian", "Turtle", "UsableBeast")
+                 "Mirror", "MusKingian", "MystElfian", "Rainbow", "Sheepian", "Thronian", "Turtle", "UsableBeast",
+                 "Horus")
 RITUAL_REQUIREMENT_KEYS = ("card", "type", "fusion_group", "min_attack", "min_defense", "max_attack", "max_defense",
                            "min_level", "max_level", "defense_gt_attack")
 

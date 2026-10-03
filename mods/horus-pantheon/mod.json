@@ -1,0 +1,64 @@
+{
+    "id": "horus-pantheon",
+    "name": "Horus: King's Sarcophagus",
+    "version": "1.0",
+    "author": "NakajimaAkemi",
+    "description": "The four Sons of Horus, King's Sarcophagus, Walls of the Imperial Tomb and Horus the Black Flame Deity, adapted to Forbidden Memories: three Sons on the field and the Sarcophagus call the Deity, and the Tomb empowers the family. Sold as a pack on the Password screen.",
+    "enabled": false,
+    "cards": [
+        {"id": "imsety", "copy": "Dark Magician", "name": "Imsety, Glory of Horus",
+         "description": "The eldest Son of Horus. With two brothers on the field, King's Sarcophagus opens and the Black Flame Deity rises.",
+         "type": "Spellcaster", "attribute": "Dark", "level": 8, "stars": ["Moon", "Sun"],
+         "attack": 2200, "defense": 1500, "fusion_groups": ["Horus"], "drops": false,
+         "notes": "Real card: Lv8 DARK Spellcaster 3000/1800, revives from the GY with King's Sarcophagus. Scaled for FM, where any level can be played without tributes."},
+        {"id": "duamutef", "copy": "Silver Fang", "name": "Duamutef, Blessing of Horus",
+         "description": "A jackal-headed Son of Horus. Weak alone, but Walls of the Imperial Tomb blesses it beyond its brothers.",
+         "type": "Beast", "attribute": "Water", "level": 8, "stars": ["Neptune", "Jupiter"],
+         "attack": 1200, "defense": 1200, "fusion_groups": ["Horus"], "drops": false,
+         "notes": "Real card: 0/0, gains 1200 ATK/DEF per Horus monster. Here the Tomb equip gives it +2400 instead of the family's +700."},
+        {"id": "qebehsenuef", "copy": "Punished Eagle", "name": "Qebehsenuef, Protection of Horus",
+         "description": "The falcon-headed Son of Horus. It shields the family with its wings while the Sarcophagus is readied.",
+         "type": "Winged Beast", "attribute": "Earth", "level": 8, "stars": ["Saturn", "Uranus"],
+         "attack": 1600, "defense": 2400, "fusion_groups": ["Horus"], "drops": false,
+         "notes": "Real card: 2500/2000, stops the opponent targeting Horus monsters. Here the family's wall: high DEF, and the Tomb adds +1200."},
+        {"id": "hapi", "copy": "Sengenjin", "name": "Hapi, Guidance of Horus",
+         "description": "The baboon-headed Son of Horus. It guides its brothers to the tomb and the Deity's return.",
+         "type": "Beast-Warrior", "attribute": "Wind", "level": 8, "stars": ["Mercury", "Mars"],
+         "attack": 2000, "defense": 1600, "fusion_groups": ["Horus"], "drops": false,
+         "notes": "Real card: 2400/1600, recycles cards from the GY or banishment."},
+        {"id": "black-flame-deity", "copy": "Meteor B. Dragon", "name": "Horus the Black Flame Deity",
+         "description": "The god-king rises from King's Sarcophagus when three of his Sons stand guard, burning the field in black flame.",
+         "type": "Dragon", "attribute": "Fire", "level": 8, "stars": ["Sun", "Mars"],
+         "attack": 3500, "defense": 2800, "fusion_groups": [], "frame": "Orange", "drops": false,
+         "notes": "Real card: 3000/1800, Special Summoned with King's Sarcophagus when a Horus card leaves the field. Here the ritual result."},
+        {"id": "kings-sarcophagus", "copy": "Black Luster Ritual", "name": "King's Sarcophagus",
+         "description": "Offer three Sons of Horus on your field to call Horus the Black Flame Deity.",
+         "drops": false,
+         "notes": "Real card: Continuous Spell, the engine of the deck. FM has no continuous spells, so it is the ritual that brings out the Deity."},
+        {"id": "walls-of-the-imperial-tomb", "copy": "Megamorph", "name": "Walls of the Imperial Tomb",
+         "description": "Equip only to a Horus monster. +700 ATK/DEF; Duamutef +2400, Qebehsenuef +1200, the Deity +1000.",
+         "drops": false,
+         "notes": "Real card: Field Spell whose name becomes King's Sarcophagus. FM's six terrains cannot be added to, so it is the family's equip."}
+    ],
+    "rituals": [
+        {"card": "horus-pantheon:kings-sarcophagus:1", "result": "horus-pantheon:black-flame-deity:1",
+         "tributes": [{"fusion_group": "Horus"}, {"fusion_group": "Horus"}, {"fusion_group": "Horus"}]}
+    ],
+    "equips": [
+        {"card": "horus-pantheon:walls-of-the-imperial-tomb:1", "replace": true,
+         "add": ["horus-pantheon:imsety:1", "horus-pantheon:duamutef:1", "horus-pantheon:qebehsenuef:1",
+                 "horus-pantheon:hapi:1", "horus-pantheon:black-flame-deity:1"],
+         "bonus": 700, "bonus_if": {"Beast": 2400, "Winged Beast": 1200, "Dragon": 1000}}
+    ],
+    "packs": [
+        {"id": "imperial-tomb", "name": "Imperial Tomb", "price": 150, "count": 5,
+         "description": "The Sons of Horus, the Sarcophagus, the Tomb and the Black Flame Deity.",
+         "tiers": {
+             "common": {"odds": 750, "cards": ["horus-pantheon:imsety:1", "horus-pantheon:duamutef:1",
+                                               "horus-pantheon:qebehsenuef:1", "horus-pantheon:hapi:1"]},
+             "rare": {"odds": 200, "cards": ["horus-pantheon:kings-sarcophagus:1", "horus-pantheon:walls-of-the-imperial-tomb:1"]},
+             "ultra": {"odds": 50, "cards": ["horus-pantheon:black-flame-deity:1"]}
+         },
+         "guarantee": {"rare": 1}, "max_copies": 3}
+    ]
+}

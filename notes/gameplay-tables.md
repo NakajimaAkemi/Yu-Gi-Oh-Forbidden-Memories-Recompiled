@@ -158,7 +158,7 @@ must meet:
 |---|---|
 | `card` | is this card, or a copy of it |
 | `type` | is of this monster type (`"Dragon"`, `"Rock"`...) |
-| `fusion_group` | is in this group of the fusion guides: `AngelWinged`, `Bugrothian`, `Egg`, `Elf`, `FeatherFromBear`, `FeatherFromHarpie`, `FeatherFromMachine`, `Female`, `Jar`, `Koumorian`, `MercuryMagicUser`, `MercurySpellcaster`, `Mirror`, `MusKingian`, `MystElfian`, `Rainbow`, `Sheepian`, `Thronian`, `Turtle`, `UsableBeast` |
+| `fusion_group` | is in this group of the fusion guides: `AngelWinged`, `Bugrothian`, `Egg`, `Elf`, `FeatherFromBear`, `FeatherFromHarpie`, `FeatherFromMachine`, `Female`, `Jar`, `Koumorian`, `MercuryMagicUser`, `MercurySpellcaster`, `Mirror`, `MusKingian`, `MystElfian`, `Rainbow`, `Sheepian`, `Thronian`, `Turtle`, `UsableBeast`; and `Horus`, which no disc card is in, for a mod's own cards (`"fusion_groups": ["Horus"]`) |
 | `min_attack`, `max_attack`, `min_defense`, `max_defense` | has at least or at most this printed ATK or DEF, 0 to 9999 |
 | `min_level`, `max_level` | has at least or at most this many stars, 0 to 12 |
 | `defense_gt_attack` | `true`: has more DEF than ATK |

@@ -111,7 +111,10 @@ enum {
     CARD_FUSION_GROUP_SHEEPIAN,
     CARD_FUSION_GROUP_THRONIAN,
     CARD_FUSION_GROUP_TURTLE,
-    CARD_FUSION_GROUP_USABLE_BEAST
+    CARD_FUSION_GROUP_USABLE_BEAST,
+    /* Groups no retail card is in, for a mod's own cards to join. */
+    CARD_FUSION_GROUP_HORUS,
+    CARD_FUSION_GROUP_LAST = CARD_FUSION_GROUP_HORUS
 };
 int Cards_FusionGroupNamed(const char *text);
 int Cards_InFusionGroup(int id, int group);

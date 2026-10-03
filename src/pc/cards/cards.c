@@ -466,6 +466,7 @@ int Cards_FusionGroupNamed(const char *text)
         {"Thronian", CARD_FUSION_GROUP_THRONIAN},
         {"Turtle", CARD_FUSION_GROUP_TURTLE},
         {"UsableBeast", CARD_FUSION_GROUP_USABLE_BEAST},
+        {"Horus", CARD_FUSION_GROUP_HORUS},
     };
     size_t i;
     for (i = 0; i < sizeof(groups) / sizeof(groups[0]); i++)
@@ -570,7 +571,7 @@ int Cards_InFusionGroup(int id, int group)
     static unsigned int by_id[CARD_ID_END];
     static int looked_up;
     int base;
-    if (!Cards_Valid(id) || group <= CARD_FUSION_GROUP_NONE || group > CARD_FUSION_GROUP_USABLE_BEAST) return 0;
+    if (!Cards_Valid(id) || group <= CARD_FUSION_GROUP_NONE || group > CARD_FUSION_GROUP_LAST) return 0;
     if (has_fusion_groups[id]) return !!(fusion_groups[id] & (1u << group));
     /* Membership is the canonical "secondary card types by card" table from
      * Marcelo Silvarolla's programmatically validated Forbidden Memories
@@ -1189,7 +1190,7 @@ static void add_entry(const char *mod, const char *directory, int index, const J
             entry_has_fusion_groups = 1;
             for (g = Json_At(groups, 0); g; g = Json_Next(g)) {
                 int group = Cards_FusionGroupNamed(Json_String(g, NULL));
-                if (group > CARD_FUSION_GROUP_NONE && group <= CARD_FUSION_GROUP_USABLE_BEAST)
+                if (group > CARD_FUSION_GROUP_NONE && group <= CARD_FUSION_GROUP_LAST)
                     entry_fusion_groups |= 1u << group;
                 else
                     Mods_Note(mod, "cards[%d]: unknown fusion_groups entry", index);
