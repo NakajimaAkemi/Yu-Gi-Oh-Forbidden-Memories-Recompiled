@@ -138,6 +138,26 @@ as distance fields -- which needs no art, no font for the symbols and no extra
 texture -- and only when something changes, so it costs nothing per frame. A
 connected controller hides it.
 
+## Installing it
+
+`adb install -r tmp/pc/android/memories.apk` is the way that always works:
+it goes around the installer's own checks. Installing by tapping the file
+needs two settings first, because the APK is signed with a debug key and
+Android treats it as any other sideload:
+
+  * the app doing the installing needs permission -- Settings > Apps >
+    Special app access > Install unknown apps > the file manager or browser
+    > Allow;
+  * Play Protect scans it and refuses an unknown developer: Play Store >
+    your profile > Play Protect > settings, turn off "Scan apps with Play
+    Protect" (or take "Install anyway" from the dialog's details).
+
+"App not installed" with both of those done usually means a copy is already
+there signed with a different key, which cannot be replaced in place:
+`adb uninstall com.yfm.redecomp` first. The debug key is
+`tmp/pc/android-debug.keystore`; keep it to keep updating in place, and
+expect to uninstall once if it is ever lost.
+
 ## Not yet run
 
 The library links, the APK installs and the whole path is reproducible, but

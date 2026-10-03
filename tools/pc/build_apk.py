@@ -59,7 +59,11 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--build", default="tmp/pc/android", help="where build_game32.py put the library")
     parser.add_argument("--out", default=None, help="the APK to write (default <build>/memories.apk)")
-    parser.add_argument("--keystore", default=f"{DEPS}/debug.keystore")
+    # Not under the dependencies: re-fetching those would make a new key, and
+    # an APK signed with a different one than the copy already on the device
+    # cannot replace it -- Android refuses it as "App not installed" until the
+    # old one is uninstalled. Keeping it beside them survives that.
+    parser.add_argument("--keystore", default="tmp/pc/android-debug.keystore")
     options = parser.parse_args()
     os.chdir(ROOT)
     build = options.build
@@ -113,10 +117,18 @@ def main():
              "-storepass", "android", "-keypass", "android", "-keyalg", "RSA", "-keysize", "2048",
              "-validity", "10950", "-dname", "CN=Forbidden Memories Recompiled debug"])
         print(f"{options.keystore}: generated a debug signing key")
+    # apksigner's defaults write the v1, v2 and v3 signatures, so the APK
+    # installs by hand as well as through adb. `apksigner verify` then reports
+    # only v3 as used, which is the scheme a minSdk 28 platform goes by, not a
+    # missing signature: `verify --min-sdk-version 21` shows all three.
     run([tool("apksigner"), "sign", "--ks", options.keystore, "--ks-pass", "pass:android",
          "--ks-key-alias", "androiddebugkey", "--key-pass", "pass:android",
          "--out", out, f"{work}/aligned.apk"])
     run([tool("apksigner"), "verify", out])
+    # Android 11 and later refuse an APK whose resources.arsc is compressed or
+    # is not 4-byte aligned, and signing happens after zipalign, so the result
+    # is what gets checked.
+    run([tool("zipalign"), "-c", "4", out])
     size = os.path.getsize(out)
     print(f"{out}: {size // 1024} KiB, {ABI}, minSdk {MIN_SDK}")
     print("install it with: adb install -r " + out)
