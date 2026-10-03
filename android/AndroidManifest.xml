@@ -15,6 +15,10 @@
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.gamepad" android:required="false" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- screenOrientation on the activity implies this one as required, which
+         would keep the app off a device that cannot turn: the picture is 4:3
+         and landscape suits it, but it is a preference, not a requirement. -->
+    <uses-feature android:name="android.hardware.screen.landscape" android:required="false" />
 
     <!-- No permission is asked for. The disc image, the saves and the
          screenshots live in the app's own folder on shared storage, which
