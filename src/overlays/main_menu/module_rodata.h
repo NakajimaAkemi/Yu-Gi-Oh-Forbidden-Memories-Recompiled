@@ -4,7 +4,7 @@
 #include "../../types.h"
 
 typedef struct {
-    s32 (*entries[6])();
+    s32 (*G32 entries[6])();
 } MainMenuComparators;
 
 extern const MainMenuComparators D_80180004;
