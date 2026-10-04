@@ -22,7 +22,8 @@ import org.libsdl.app.SDLActivity;
  *  - it names the library the game is in, which SDL then looks SDL_main up
  *    in (libmemories.so, built by tools/pc/build_game32.py --target android);
  *  - it unpacks what a desktop release would have shipped beside the
- *    executable -- the mods and the languages -- out of the APK's assets;
+ *    executable -- the mods and the languages -- out of the APK's assets,
+ *    and the disc image too when one was built in;
  *  - it tells the game where that folder is (nativeSetPaths), because an app
  *    has no command line and no program directory to find.
  *
@@ -35,8 +36,13 @@ public class MemoriesActivity extends SDLActivity {
     private static final String TAG = "memories";
     /** Assets unpacked from the APK; everything else in it is left alone.
      * The mod SDK a desktop release carries is not among them: a mod is
-     * built on a computer, not here. */
+     * built on a computer, not here. The disc image, when the APK carries
+     * one, is unpacked separately: it is hundreds of megabytes, and doing
+     * that on the thread that draws would have Android stop the app for not
+     * responding. */
     private static final String[] UNPACKED = { "mods", "languages" };
+    /** Where a built-in disc image lives in the assets, if there is one. */
+    private static final String DISC_ASSETS = "game";
 
     /** Tells the game the two roots paths.c would otherwise work out itself. */
     private static native void nativeSetPaths(String programDir, String userDir);
@@ -64,10 +70,52 @@ public class MemoriesActivity extends SDLActivity {
     protected void main() {
         /* Called on SDL's own thread once the libraries are loaded, which is
          * what nativeSetPaths needs, and before SDL_main, which is what the
-         * paths are for. */
+         * paths are for. The disc is unpacked here rather than in onCreate
+         * because it takes the better part of a minute: this thread is not
+         * the one Android watches, so a long wait here delays the game
+         * rather than ending it. */
         File root = filesRoot();
+        try {
+            unpackDisc(root);
+        } catch (IOException failure) {
+            /* The game says what it could not find, and the player can still
+             * put an image in the folder themselves. */
+            Log.e(TAG, "cannot unpack the disc image", failure);
+        }
         nativeSetPaths(root.getAbsolutePath(), root.getAbsolutePath());
         super.main();
+    }
+
+    /**
+     * Copy a disc image built into the APK into the game folder, once. An
+     * APK without one does nothing here, and so does one whose image is
+     * already unpacked: the file is checked by name and size, since what is
+     * in the assets cannot change without the version changing too.
+     */
+    private void unpackDisc(File root) throws IOException {
+        String[] names = getAssets().list(DISC_ASSETS);
+        if (names == null || names.length == 0) {
+            return; /* no disc built in: the player brings their own */
+        }
+        File game = new File(root, "game");
+        if (!game.isDirectory() && !game.mkdirs()) {
+            throw new IOException("cannot create " + game);
+        }
+        /* A stamp rather than a comparison: measuring a compressed asset
+         * means inflating all of it, which is the very cost being avoided.
+         * The version covers it, since the assets cannot change without it
+         * changing too. */
+        File stamp = new File(game, ".disc-unpacked");
+        String want = version();
+        if (want.equals(read(stamp))) {
+            return;
+        }
+        for (String name : names) {
+            Log.i(TAG, "unpacking " + name + "; this happens once and takes a while");
+            copyFile(getAssets(), DISC_ASSETS + "/" + name, new File(game, name));
+            Log.i(TAG, "unpacked " + name);
+        }
+        write(stamp, want);
     }
 
     /**
@@ -109,6 +157,10 @@ public class MemoriesActivity extends SDLActivity {
             throw new IOException("cannot create " + game);
         }
         File note = new File(game, "PUT-YOUR-DISC-IMAGE-HERE.txt");
+        String[] built_in = getAssets().list(DISC_ASSETS);
+        if (built_in != null && built_in.length > 0) {
+            return; /* the APK carries one; the player need not find theirs */
+        }
         if (!note.exists()) {
             write(note, "Put your own copy of the Yu-Gi-Oh! Forbidden Memories disc in this\n"
                       + "folder: the raw .bin file of a .bin/.cue pair, from the USA release\n"

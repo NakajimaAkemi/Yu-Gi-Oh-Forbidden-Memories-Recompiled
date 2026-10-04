@@ -7,6 +7,11 @@ in tmp/pc/android and wraps it:
   * the resources and the manifest go through aapt2 (android/);
   * SDL3's Java glue and the activity (android/java) are compiled against
     android.jar and dexed with d8;
+  * --disc builds a disc image into the APK, under assets/game/, which the
+    activity unpacks into the player's game folder the first time it runs.
+    No image is included otherwise, and none is in the repository: it is the
+    player's own copy, and an APK with one in it is theirs alone and not to
+    be passed on;
   * every ABI that has been built goes in lib/<abi>/, each with its own
     libmemories.so and libSDL3.so, so one APK installs on a 32-bit device
     and on a 64-bit-only one alike; the mods and the languages -- what a
@@ -65,6 +70,7 @@ def main():
     parser.add_argument("--abi", action="append", choices=list(ABI_BUILDS),
                         help="only this ABI (repeatable; default every one that is built)")
     parser.add_argument("--out", default="tmp/pc/android/memories.apk", help="the APK to write")
+    parser.add_argument("--disc", help="a disc image (.bin, and its .cue beside it) to build in")
     # Not under the dependencies: re-fetching those would make a new key, and
     # an APK signed with a different one than the copy already on the device
     # cannot replace it -- Android refuses it as "App not installed" until the
@@ -101,6 +107,19 @@ def main():
         if os.path.isdir(f"{build}/{tree}"):
             shutil.copytree(f"{build}/{tree}", f"{assets}/{tree}")
     os.makedirs(assets, exist_ok=True)
+    if options.disc:
+        if not os.path.exists(options.disc):
+            sys.exit(f"{options.disc}: no such disc image")
+        os.makedirs(f"{assets}/game", exist_ok=True)
+        for source in [options.disc] + ([os.path.splitext(options.disc)[0] + ".cue"]
+                                        if os.path.exists(os.path.splitext(options.disc)[0] + ".cue")
+                                        else []):
+            into = f"{assets}/game/{os.path.basename(source)}"
+            try:
+                os.link(source, into)  # the image is large; do not copy it twice
+            except OSError:
+                shutil.copy2(source, into)
+        print(f"{options.disc}: built in ({os.path.getsize(options.disc) >> 20} MiB)")
 
     # Resources and manifest.
     run([tool("aapt2"), "compile", "--dir", "android/res", "-o", f"{work}/res.zip"])
