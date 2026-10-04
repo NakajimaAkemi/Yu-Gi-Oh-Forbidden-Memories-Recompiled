@@ -92,6 +92,28 @@ index 526f7f30a..7fdb0bb47 100644
    StringRef getABI() const override;
    bool setABI(const std::string &Name) override;
  
+diff --git a/llvm/lib/CodeGen/AsmPrinter/AsmPrinter.cpp b/llvm/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
+index 2297b27ff..63b0af5d6 100644
+--- a/llvm/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
++++ b/llvm/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
+@@ -3170,6 +3170,17 @@ const MCExpr *AsmPrinter::lowerConstant(const Constant *CV) {
+     if (TM.isNoopAddrSpaceCast(SrcAS, DstAS))
+       return lowerConstant(Op);
+ 
++    // A cast into a narrower address space -- the MS __ptr32 spaces, 270 and
++    // 271 -- keeps the symbol and lets the slot it is emitted into do the
++    // narrowing, which is a relocation of that width (R_X86_64_32,
++    // R_AARCH64_ABS32). Without this a static initializer holding a __ptr32
++    // pointer to a symbol cannot be emitted at all. An address that does not
++    // fit is then the linker's to report, as it is for any 32-bit
++    // relocation.
++    if (getDataLayout().getPointerSize(DstAS) <
++        getDataLayout().getPointerSize(SrcAS))
++      return lowerConstant(Op);
++
+     break; // Error
+   }
+   case Instruction::GetElementPtr: {
 diff --git a/llvm/lib/Target/AArch64/AArch64.h b/llvm/lib/Target/AArch64/AArch64.h
 index ff19327c6..4aff7b867 100644
 --- a/llvm/lib/Target/AArch64/AArch64.h

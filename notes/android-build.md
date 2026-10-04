@@ -101,7 +101,41 @@ read_through:            write_through:
 it `src/port_ptr.h` stops an AArch64 build with an #error rather than let it
 compile with every structure laid out wrong.
 
-**What is still missing for an arm64 APK**, none of it compiler work:
+The patch also adds an `AddrSpaceCast` case to `AsmPrinter::lowerConstant`,
+which is not AArch64's alone: a static initializer holding a `__ptr32`
+pointer to a symbol could not be emitted on **any** target, x86-64 included,
+because the existing case lowers the operand only for a cast the target calls
+a noop. AArch64 appeared to manage it before only because its
+`isNoopAddrSpaceCast` said yes to everything. A narrowing cast now keeps the
+symbol and lets the slot do the narrowing, which is a relocation of that
+width, and an address that does not fit becomes the linker's to report.
+
+With both, all 603 game units compile for arm64.
+
+**One site needs the port to decide something**, and no compiler can help.
+`src/overlays/main_menu/module_rodata.c` fills `D_80180004` with pointers to
+six comparators, which the port compiles as native functions:
+
+```c
+const MainMenuComparators D_80180004 = {{ (s32 (*)())MainMenu_CompareCardsByName, ... }};
+```
+
+In the ILP32 build a native address is four bytes and fits. In a 64-bit one it
+does not, and the relocation says so: `R_AARCH64_ABS32 cannot be used against
+symbol 'MainMenu_CompareCardsByName'` -- a library is placed where the loader
+likes, so no four-byte slot can hold a native function's address. The answer
+is the one the port already uses for every other table of the kind: hold the
+**guest** address (`MainMenu_CompareCardsByName` is at 0x8018416C in
+`config/slus_01411/overlays/main_menu_symbols.txt`), which is an absolute
+32-bit value, and let the resolver turn a call through it into the native
+function, exactly as it does for the text handlers and the overlay callbacks.
+That wants the build to write the addresses into a header the initializer can
+use, and a macro that is the plain function name wherever the pointers are
+native -- the matching build included, which must keep its tokens unchanged.
+`src/overlays/duel_effects/effect_22.c` has the same shape but names a pinned
+symbol, so it is already an absolute 32-bit address and links as it stands.
+
+**What else is missing for an arm64 APK**, none of it compiler work:
 
   * the guest glue, in A64: the fault handler's redirect (`uc_mcontext.pc`),
     `Memories_GuestBranchDirect`, the context switch, and an emulator for the
