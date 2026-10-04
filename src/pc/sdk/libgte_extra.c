@@ -135,7 +135,8 @@ static void load_vertex(unsigned index, const SVECTOR *v)
     Memories_GteLoad(index * 2 + 1, &v->vz);
 }
 
-long RotTransPers3(SVECTOR *v0, SVECTOR *v1, SVECTOR *v2, long *sxy0, long *sxy1, long *sxy2, long *p, long *flag)
+PSXLONG RotTransPers3(SVECTOR *v0, SVECTOR *v1, SVECTOR *v2, PSXLONG *sxy0, PSXLONG *sxy1, PSXLONG *sxy2,
+                      PSXLONG *p, PSXLONG *flag)
 {
     load_vertex(0, v0);
     load_vertex(1, v1);
@@ -145,12 +146,12 @@ long RotTransPers3(SVECTOR *v0, SVECTOR *v1, SVECTOR *v2, long *sxy0, long *sxy1
     Memories_GteStore(13, sxy1);
     Memories_GteStore(14, sxy2);
     Memories_GteStore(8, p);
-    *flag = (long)Memories_GteReadControl(31);
-    return (long)(int32_t)Memories_GteReadData(19) >> 2;
+    *flag = (PSXLONG)Memories_GteReadControl(31);
+    return (PSXLONG)((int32_t)Memories_GteReadData(19) >> 2);
 }
 
-long RotTransPers4(SVECTOR *v0, SVECTOR *v1, SVECTOR *v2, SVECTOR *v3, long *sxy0, long *sxy1, long *sxy2,
-                   long *sxy3, long *p, long *flag)
+PSXLONG RotTransPers4(SVECTOR *v0, SVECTOR *v1, SVECTOR *v2, SVECTOR *v3, PSXLONG *sxy0, PSXLONG *sxy1,
+                      PSXLONG *sxy2, PSXLONG *sxy3, PSXLONG *p, PSXLONG *flag)
 {
     uint32_t first;
     load_vertex(0, v0);
@@ -166,7 +167,7 @@ long RotTransPers4(SVECTOR *v0, SVECTOR *v1, SVECTOR *v2, SVECTOR *v3, long *sxy
     Memories_GteStore(14, sxy3);
     Memories_GteStore(8, p);
     *flag = (long)(Memories_GteReadControl(31) | first);
-    return (long)(int32_t)Memories_GteReadData(19) >> 2;
+    return (PSXLONG)((int32_t)Memories_GteReadData(19) >> 2);
 }
 
 /* Rotate an existing matrix about one axis: two rows are mixed by the
@@ -183,9 +184,9 @@ static void mix_rows(MATRIX *m, int a, int b, long angle)
     }
 }
 
-MATRIX *RotMatrixX(long r, MATRIX *m) { mix_rows(m, 1, 2, r); return m; }
-MATRIX *RotMatrixY(long r, MATRIX *m) { mix_rows(m, 0, 2, r); return m; }
-MATRIX *RotMatrixZ(long r, MATRIX *m) { mix_rows(m, 0, 1, r); return m; }
+MATRIX *RotMatrixX(PSXLONG r, MATRIX *m) { mix_rows(m, 1, 2, r); return m; }
+MATRIX *RotMatrixY(PSXLONG r, MATRIX *m) { mix_rows(m, 0, 2, r); return m; }
+MATRIX *RotMatrixZ(PSXLONG r, MATRIX *m) { mix_rows(m, 0, 1, r); return m; }
 
 /* The CPU forms of the two remaining rotation orders differ from the GTE
  * forms only in where they round (before or after a negation), at most one
@@ -207,7 +208,7 @@ VECTOR *Square0(VECTOR *v0, VECTOR *v1)
     return v1;
 }
 
-long AverageZ4(long sz0, long sz1, long sz2, long sz3)
+PSXLONG AverageZ4(PSXLONG sz0, PSXLONG sz1, PSXLONG sz2, PSXLONG sz3)
 {
     Memories_GteWriteData(16, (uint32_t)sz0);
     Memories_GteWriteData(17, (uint32_t)sz1);
@@ -218,7 +219,7 @@ long AverageZ4(long sz0, long sz1, long sz2, long sz3)
 }
 
 /* Mesh interpolation: otp += dfp * p / 4096, each vertex through GPF. */
-void gteMIMefunc(SVECTOR *otp, SVECTOR *dfp, long n, long p)
+void gteMIMefunc(SVECTOR *otp, SVECTOR *dfp, PSXLONG n, PSXLONG p)
 {
     Memories_GteWriteData(8, (uint32_t)p);
     for (; n > 0; n--, otp++, dfp++) {

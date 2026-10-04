@@ -20,7 +20,17 @@
 #include <ucontext.h>
 #endif
 
+/* What the model requires is that a pointer the game stores is four bytes
+ * wide. An ILP32 host gives that for nothing; a 64-bit one gives it through
+ * G32 (src/port_ptr.h), where the host's own pointers stay eight. */
+#include "port_ptr.h"
+#if defined(__LP64__)
+struct MemoriesGuestPointer { void *G32 p; };
+_Static_assert(sizeof(struct MemoriesGuestPointer) == 4,
+               "a 64-bit build needs G32 to give four-byte guest pointers");
+#else
 _Static_assert(sizeof(void *) == 4, "the guest image model requires an ILP32 build");
+#endif
 
 /* The first 64 KiB. On the console that is kernel RAM, and retail code reaches
  * it through null pointers: CardList_CreateSlotTextBox clears a flag in
@@ -571,6 +581,113 @@ static void on_fault(int number, siginfo_t *info, void *context)
         }
     }
     report_guest_fault(address, pc);
+    Crash_HandleSignal(number, info, context);
+}
+#elif defined(__aarch64__)
+/* The AArch64 handler, which is the 32-bit ARM one with A64's register names
+ * and encodings. The same two jobs, for the same reasons (see above): no
+ * compiler here offers an indirect-branch thunk either, so guest RAM is
+ * mapped without PROT_EXEC and a call through a pointer the retail data
+ * image holds faults and is redirected; and an access below 0x10000 is
+ * performed here rather than single-stepped, there being no trap flag. */
+static void on_fault(int number, siginfo_t *info, void *context);
+
+/* Perform the faulting A64 load or store against `low_memory` and step over
+ * it. si_addr is the effective address, so only the transfer is decoded --
+ * and the offset only for the forms that write the base register back.
+ * Returns 0 for an encoding this does not cover. */
+static int emulate_low_access(ucontext_t *user, uintptr_t address)
+{
+    /* The context's own type: __u64 is unsigned long long, which is not
+     * uint64_t on LP64 though it is the same width. */
+    unsigned long long *reg = user->uc_mcontext.regs; /* x0 to x30 */
+    uint32_t code = *(const uint32_t *)(uintptr_t)user->uc_mcontext.pc;
+    unsigned char *at = low_memory + address;
+    unsigned size = code >> 30, opc = (code >> 22) & 3u;
+    unsigned rt = code & 0x1fu, rn = (code >> 5) & 0x1fu;
+    unsigned kind = (code >> 24) & 3u, load, bytes, writeback = 0, pre = 0;
+    int64_t offset = 0;
+    uint64_t value;
+    if (((code >> 27) & 7u) != 7u || (code & (1u << 26))) {
+        return 0; /* not a load or store of a general register (26 is SIMD) */
+    }
+    if (opc == 0) {
+        load = 0;
+    } else if (size == 3u && opc == 2u) {
+        return 0; /* PRFM, which touches nothing */
+    } else {
+        load = 1;
+    }
+    bytes = 1u << size;
+    if (kind == 1u) {
+        /* unsigned immediate offset: no writeback */
+    } else if (kind == 0u) {
+        unsigned form = (code >> 10) & 3u;
+        if (code & (1u << 21)) {
+            if (form != 2u) {
+                return 0; /* not the register-offset form */
+            }
+        } else if (form == 1u || form == 3u) {
+            /* post- and pre-indexed, which write the base back */
+            writeback = 1;
+            pre = form == 3u;
+            offset = (int64_t)((int32_t)(code << 11) >> 23); /* signed imm9 */
+        } else if (form != 0u) {
+            return 0; /* not the unscaled form either */
+        }
+    } else {
+        return 0; /* a pair, or an atomic */
+    }
+    if (load) {
+        value = 0;
+        memcpy(&value, at, bytes);
+        if (opc >= 2u) { /* sign-extended to 64 bits, or to 32 */
+            unsigned width = bytes * 8u;
+            value = (uint64_t)(((int64_t)(value << (64u - width))) >> (64u - width));
+            if (opc == 3u) {
+                value = (uint32_t)value;
+            }
+        } else if (size != 3u) {
+            value = (uint32_t)value; /* a 32-bit load zeroes the top half */
+        }
+        if (rt != 31u) { /* 31 is the zero register, not sp, for a transfer */
+            reg[rt] = value;
+        }
+    } else {
+        value = rt == 31u ? 0 : reg[rt];
+        memcpy(at, &value, bytes);
+    }
+    if (writeback) {
+        uint64_t written = pre ? (uint64_t)address : (uint64_t)address + (uint64_t)offset;
+        if (rn == 31u) {
+            user->uc_mcontext.sp = written;
+        } else {
+            reg[rn] = written;
+        }
+    }
+    user->uc_mcontext.pc += 4;
+    return 1;
+}
+
+static void on_fault(int number, siginfo_t *info, void *context)
+{
+    ucontext_t *user = context;
+    uintptr_t fault = (uintptr_t)info->si_addr;
+    uint64_t pc = user->uc_mcontext.pc;
+    void *target;
+    if (pc == (uint64_t)fault && (target = guest_call_target((uint32_t)fault)) != NULL) {
+        /* AAPCS64 leaves the return address in x30, which the faulting call
+         * already set, so moving pc is the whole redirect. */
+        user->uc_mcontext.pc = (uint64_t)(uintptr_t)target;
+        return;
+    }
+    if (fault < 0x10000u && pc != (uint64_t)fault && low_memory) {
+        report_low_access((uint32_t)pc, (uint32_t)fault);
+        if (emulate_low_access(user, fault)) {
+            return;
+        }
+    }
+    report_guest_fault((uint32_t)fault, (uint32_t)pc);
     Crash_HandleSignal(number, info, context);
 }
 #else

@@ -37,19 +37,27 @@
 /* Windows has no ucontext, and neither does Android: bionic never shipped
  * getcontext, makecontext or swapcontext. Both reach the game's fixed stack
  * through Memories_ContextSwitch (state_i386.S, state_arm.S) instead. */
-#if defined(_WIN32) || defined(__arm__)
+#if defined(_WIN32) || defined(__arm__) || defined(__aarch64__)
 #define MEMORIES_OWN_CONTEXT 1
 #else
 #include <ucontext.h>
 #endif
 /* The frame Memories_ContextSwitch pops to enter a routine: the registers it
- * keeps, then the return address it leaves with. */
-#if defined(__arm__)
+ * keeps, then the return address it leaves with, counted in machine words.
+ * CONTEXT_ROOM is the space left for it below the stack's top, which AAPCS64
+ * also wants 16-byte aligned. */
+#if defined(__aarch64__)
+#define CONTEXT_WORDS 20 /* x19-x28, x29, x30, d8-d15 */
+#define CONTEXT_RETURN 11
+#define CONTEXT_ROOM 192
+#elif defined(__arm__)
 #define CONTEXT_WORDS 10 /* r4-r11, r12, lr */
 #define CONTEXT_RETURN 9
+#define CONTEXT_ROOM 64
 #else
 #define CONTEXT_WORDS 6 /* edi, esi, ebx, ebp, the return into the routine, and the slot its own return takes */
 #define CONTEXT_RETURN 4
+#define CONTEXT_ROOM 64
 #endif
 
 #ifdef _WIN32
@@ -115,8 +123,9 @@ static unsigned region_count;
  * of the stack instead leaves no room to deliver the exception, and the
  * process just ends. */
 #define GUARD_ROOM 0x10000u
-void Memories_ContextSwitch(uint32_t *from_sp, const uint32_t *to_sp);
-static uint32_t service_context, game_context;
+void Memories_ContextSwitch(uintptr_t *from_sp, const uintptr_t *to_sp);
+/* A context is a stack pointer, so it is as wide as one. */
+static uintptr_t service_context, game_context;
 static uint32_t process_bounds[4];
 static const uint32_t game_bounds[4] = {0xffffffffu, STACK_TOP, STACK_BASE, /* no handlers */
                                         STACK_BASE + GUARD_ROOM + 0x1000u};
@@ -150,6 +159,26 @@ static void leave_game_stack(void)
     Memories_ContextSwitch(&game_context, &service_context);
 }
 
+#if defined(__aarch64__)
+/* setjmp_arm64.S: the game's one jmp_buf is the Psy-Q int[12] at a retail
+ * address, 48 bytes, and AAPCS64's callee-saved state is 104, so the
+ * registers live here and the buffer keeps only the token. One area serves
+ * because the game has one jmp_buf -- setjmp is called once, in Main_Init,
+ * and every longjmp names D_800E9DC0. The values are written once at startup
+ * and describe a place on the fixed game stack, so a state loaded into the
+ * same build finds them already right; they are not part of the state.
+ * The token must match setjmp_arm64.S. */
+uint64_t Memories_JumpState[13];
+
+void Memories_JumpUnset(void) __attribute__((noreturn));
+void Memories_JumpUnset(void)
+{
+    /* Restoring whatever the area happens to hold would jump into nothing. */
+    fprintf(stderr, "memories-pc: longjmp through a jmp_buf that no setjmp filled\n");
+    abort();
+}
+#endif
+
 /* The VSync a loaded state resumes in (apply). */
 static MemoriesStateEntry resume_entry;
 
@@ -164,14 +193,14 @@ static ucontext_t service_context, game_context;
 
 /* The frame a context starts on, inside the room `top` leaves below it. */
 #ifdef MEMORIES_OWN_CONTEXT
-static uint32_t *context_frame(uint32_t top, void (*routine)(void))
+static uintptr_t *context_frame(uintptr_t top, void (*routine)(void))
 {
-    uint32_t *frame = (uint32_t *)(uintptr_t)(top - 64);
+    uintptr_t *frame = (uintptr_t *)(top - CONTEXT_ROOM);
     unsigned i;
     for (i = 0; i < CONTEXT_WORDS; i++) {
         frame[i] = 0;
     }
-    frame[CONTEXT_RETURN] = (uint32_t)(uintptr_t)routine;
+    frame[CONTEXT_RETURN] = (uintptr_t)routine;
     return frame;
 }
 #endif
@@ -656,7 +685,7 @@ static void apply(void)
          * resume_game on the game stack, below what the state restored
          * there. */
         resume_entry = entry;
-        game_context = (uint32_t)(uintptr_t)context_frame(entry.sp, resume_game);
+        game_context = (uintptr_t)context_frame((uintptr_t)entry.sp, resume_game);
         Memories_ContextSwitch(&service_context, &game_context);
     }
 #else
@@ -960,8 +989,8 @@ static int from_game_code(void)
     if (Memories_StateEntry.sp < STACK_BASE || Memories_StateEntry.sp >= STACK_TOP) {
         return 0;
     }
-#if defined(__arm__)
-    caller = Memories_StateEntry.lr; /* AAPCS keeps it in a register */
+#if defined(__arm__) || defined(__aarch64__)
+    caller = (uintptr_t)Memories_StateEntry.lr; /* AAPCS keeps it in a register */
 #else
     caller = *(const uint32_t *)(uintptr_t)Memories_StateEntry.sp;
 #endif
@@ -1132,7 +1161,7 @@ int Memories_StateRunGame(int (*entry)(void))
         /* context_frame lays out what Memories_ContextSwitch pops: the
          * callee-saved registers, then the return into run_game, whose own
          * return address is never used. */
-        game_context = (uint32_t)(uintptr_t)context_frame(STACK_TOP, run_game);
+        game_context = (uintptr_t)context_frame(STACK_TOP, run_game);
         Win32_GuardStack(STACK_BASE, GUARD_ROOM);
         save_stack_bounds(process_bounds);
         set_stack_bounds(game_bounds);

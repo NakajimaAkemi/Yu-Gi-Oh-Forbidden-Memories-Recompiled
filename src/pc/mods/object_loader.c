@@ -18,8 +18,15 @@
 #define EM_386 3
 #define EM_ARM 40
 /* A mod's object is host machine code, so it must be this build's machine:
- * x86 for the PC game, ARM for the Android one. */
-#if defined(__arm__)
+ * x86 for the PC game, 32-bit ARM for the armeabi-v7a Android one. Nothing
+ * is loadable in a 64-bit build: everything below reads the ELF32 shapes --
+ * 40-byte section headers, 16-byte symbols -- and an LP64 object has none of
+ * them, so the arm64 build refuses a mod object outright rather than
+ * misread one. Writing the ELF64 half is what it would take. */
+#if defined(__LP64__)
+#define EM_HOST 0
+#define EM_HOST_NAME "loadable here (this build reads no mod objects)"
+#elif defined(__arm__)
 #define EM_HOST EM_ARM
 #define EM_HOST_NAME "32-bit ARM code"
 #else

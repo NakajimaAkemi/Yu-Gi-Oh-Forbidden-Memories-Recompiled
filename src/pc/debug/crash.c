@@ -117,6 +117,11 @@ static void context_registers(const ucontext_t *user, uintptr_t *pc, uintptr_t *
     *pc = (uintptr_t)user->uc_mcontext.arm_pc;
     *sp = (uintptr_t)user->uc_mcontext.arm_sp;
     *fp = (uintptr_t)user->uc_mcontext.arm_fp;
+#elif defined(__aarch64__)
+    /* AAPCS64 keeps the frame pointer in x29. */
+    *pc = (uintptr_t)user->uc_mcontext.pc;
+    *sp = (uintptr_t)user->uc_mcontext.sp;
+    *fp = (uintptr_t)user->uc_mcontext.regs[29];
 #else
     *pc = (uintptr_t)user->uc_mcontext.gregs[REG_EIP];
     *sp = (uintptr_t)user->uc_mcontext.gregs[REG_ESP];

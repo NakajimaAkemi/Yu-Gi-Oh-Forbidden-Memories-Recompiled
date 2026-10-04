@@ -26,23 +26,23 @@ void SpuInit(void)
 }
 
 void SpuQuit(void) {}
-long SpuSetReverb(long on_off) { return reverb_on = on_off; }
-long SpuGetReverb(void) { return reverb_on; }
-long SpuSetReverbModeParam(SpuReverbAttr *attr) { (void)attr; return 0; }
-long SpuSetReverbModeType(long type) { (void)type; return 0; }
-long SpuReserveReverbWorkArea(long on_off) { return reverb_reserved = on_off; }
-long SpuIsReverbWorkAreaReserved(long on_off) { (void)on_off; return reverb_reserved; }
+PSXLONG SpuSetReverb(PSXLONG on_off) { return reverb_on = on_off; }
+PSXLONG SpuGetReverb(void) { return reverb_on; }
+PSXLONG SpuSetReverbModeParam(SpuReverbAttr *attr) { (void)attr; return 0; }
+PSXLONG SpuSetReverbModeType(PSXLONG type) { (void)type; return 0; }
+PSXLONG SpuReserveReverbWorkArea(PSXLONG on_off) { return reverb_reserved = on_off; }
+PSXLONG SpuIsReverbWorkAreaReserved(PSXLONG on_off) { (void)on_off; return reverb_reserved; }
 
-unsigned long SpuSetReverbVoice(long on_off, unsigned long voice_bit)
+unsigned PSXLONG SpuSetReverbVoice(PSXLONG on_off, unsigned PSXLONG voice_bit)
 {
     reverb_voices = on_off ? reverb_voices | voice_bit : reverb_voices & ~voice_bit;
     return reverb_voices;
 }
 
-unsigned long SpuGetReverbVoice(void) { return reverb_voices; }
-long SpuSetTransferMode(long transfer_mode) { return transfer_mode; }
+unsigned PSXLONG SpuGetReverbVoice(void) { return reverb_voices; }
+PSXLONG SpuSetTransferMode(PSXLONG transfer_mode) { return transfer_mode; }
 
-unsigned long SpuSetTransferStartAddr(unsigned long address)
+unsigned PSXLONG SpuSetTransferStartAddr(unsigned PSXLONG address)
 {
     if (address >= SPU_RAM_SIZE) {
         return 0;
@@ -50,7 +50,7 @@ unsigned long SpuSetTransferStartAddr(unsigned long address)
     return transfer_address = address & ~7ul;
 }
 
-unsigned long SpuWrite(unsigned char *address, unsigned long size)
+unsigned PSXLONG SpuWrite(unsigned char *address, unsigned PSXLONG size)
 {
     if (size > SPU_RAM_SIZE - transfer_address) {
         size = SPU_RAM_SIZE - transfer_address;
@@ -60,16 +60,16 @@ unsigned long SpuWrite(unsigned char *address, unsigned long size)
     return size;
 }
 
-long SpuIsTransferCompleted(long flag) { (void)flag; return 1; }
+PSXLONG SpuIsTransferCompleted(PSXLONG flag) { (void)flag; return 1; }
 
-long SpuReadDecodedData(SpuDecodedData *data, long flag)
+PSXLONG SpuReadDecodedData(SpuDecodedData *data, PSXLONG flag)
 {
     (void)flag;
     memset(data, 0, sizeof(*data));
     return 0;
 }
 
-long SpuSetIRQ(long on_off) { return on_off; }
+PSXLONG SpuSetIRQ(PSXLONG on_off) { return on_off; }
 
 /* The library's integer note-to-pitch: notes are semitone in the high byte
  * and 1/128 semitone below; an octave is 1536 units. Within the octave it
@@ -163,7 +163,7 @@ void SpuSetVoiceAttr(SpuVoiceAttr *attr)
     }
 }
 
-void SpuSetKey(long on_off, unsigned long voice_bit)
+void SpuSetKey(PSXLONG on_off, unsigned PSXLONG voice_bit)
 {
     if (on_off) {
         Spu_KeyOn(voice_bit);
@@ -182,7 +182,7 @@ void SpuSetKeyOnWithAttr(SpuVoiceAttr *attr)
     Spu_KeyOn(attr->voice);
 }
 
-long SpuGetKeyStatus(unsigned long voice_bit)
+PSXLONG SpuGetKeyStatus(unsigned PSXLONG voice_bit)
 {
     unsigned v;
     for (v = 0; v < SPU_VOICES; v++) {

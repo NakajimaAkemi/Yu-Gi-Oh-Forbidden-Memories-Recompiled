@@ -205,6 +205,8 @@ static void on_alarm(int number, siginfo_t *info, void *context)
     (void)info;
 #if defined(__arm__)
     on_tick((uintptr_t)user->uc_mcontext.arm_pc, context);
+#elif defined(__aarch64__)
+    on_tick((uintptr_t)user->uc_mcontext.pc, context);
 #else
     on_tick((uintptr_t)user->uc_mcontext.gregs[REG_EIP], context);
 #endif

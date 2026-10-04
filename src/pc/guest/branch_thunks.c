@@ -160,4 +160,51 @@ __asm__(".text\n"
         ".Lresolver_offset:\n"
         "    .word Memories_GuestBranchResolver - (.Lresolver_pc + 8)\n"
         "    .size Memories_GuestBranchDirect, . - Memories_GuestBranchDirect\n");
+#elif defined(__aarch64__)
+
+/* AArch64 (Android), the same story as 32-bit ARM above: no compiler offers
+ * an indirect-branch thunk here either, so there are none, guest RAM is
+ * mapped without PROT_EXEC, and a call through a pointer the retail data
+ * image holds faults on its first instruction and is redirected by on_fault
+ * (image.c). AAPCS64 leaves the return address in x30, so the redirect
+ * leaves the callee's frame exactly as a direct call would.
+ *
+ * A module function that C calls by name is pinned to its guest address, so
+ * that call is direct and nothing would fault: the build gives each such
+ * name a host stub that loads the address into x16 and enters the entry
+ * below (tools/pc/build_game32.py, write_guest_branches).
+ *
+ * Kept across the resolver: x0-x7, the argument registers, x8, the indirect
+ * result location, and x30. Not the floating-point argument registers, as
+ * neither the i386 nor the 32-bit ARM entry keeps theirs: the game is
+ * integer code, the console having no FPU, so nothing reaches a guest
+ * pointer with an argument in v0-v7. x16 and x17 are IP0 and IP1, which a
+ * call may clobber anyway. The twelve pushed words keep sp 16-byte aligned,
+ * as AAPCS64 wants at a public interface. */
+__asm__(".text\n"
+        "    .globl Memories_GuestBranchDirect\n"
+        "    .type Memories_GuestBranchDirect, %function\n"
+        "Memories_GuestBranchDirect:\n"
+        "    stp x0, x1, [sp, #-96]!\n"
+        "    stp x2, x3, [sp, #16]\n"
+        "    stp x4, x5, [sp, #32]\n"
+        "    stp x6, x7, [sp, #48]\n"
+        "    stp x8, x30, [sp, #64]\n"
+        "    str x16, [sp, #80]\n"
+        "    adrp x17, Memories_GuestBranchResolver\n"
+        "    add x17, x17, :lo12:Memories_GuestBranchResolver\n"
+        "    ldr x17, [x17]\n"
+        "    cbz x17, 1f\n"
+        "    mov w0, w16\n"
+        "    blr x17\n"
+        /* The resolved target replaces the saved x16 that 1: reloads. */
+        "    str x0, [sp, #80]\n"
+        "1:  ldr x16, [sp, #80]\n"
+        "    ldp x8, x30, [sp, #64]\n"
+        "    ldp x6, x7, [sp, #48]\n"
+        "    ldp x4, x5, [sp, #32]\n"
+        "    ldp x2, x3, [sp, #16]\n"
+        "    ldp x0, x1, [sp], #96\n"
+        "    br x16\n"
+        "    .size Memories_GuestBranchDirect, . - Memories_GuestBranchDirect\n");
 #endif

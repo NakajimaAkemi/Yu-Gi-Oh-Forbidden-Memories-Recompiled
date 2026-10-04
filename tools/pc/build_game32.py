@@ -30,30 +30,46 @@ ADDRESSES = "config/pc/guest_addresses.txt"
 TARGET = next((sys.argv[i + 1] for i, word in enumerate(sys.argv[:-1]) if word == "--target"),
               os.environ.get("MEMORIES_TARGET") or ("windows" if sys.platform == "win32" else "linux"))
 WINDOWS = TARGET == "windows"
-ANDROID = TARGET == "android"
+ANDROID = TARGET in ("android", "android-arm64")
+ANDROID64 = TARGET == "android-arm64"
 WIN32_DEPS = "tmp/pc/win32-deps"  # tools/pc/build_win32_deps.py
 # --target android builds the game as one shared library for 32-bit ARM, the
-# library an APK loads (notes/android-build.md). 32-bit ARM is the port's
-# architecture there because the memory model is ILP32: guest RAM sits at its
-# retail addresses and the game's structures hold 32-bit pointers, which
-# armeabi-v7a gives natively and arm64 does not -- clang's __ptr32 (src/port_ptr.h)
-# is an x86 extension that AArch64 silently ignores. tools/pc/build_android_deps.py
-# fetches the NDK and the SDK and builds SDL3, FreeType and libpng into
-# tmp/pc/android-deps; ANDROID_NDK and ANDROID_HOME are honoured when set.
+# library an APK loads (notes/android-build.md).
+#
+# Two ABIs, because the memory model wants the game's structures to hold
+# 32-bit pointers wherever the host is: --target android is armeabi-v7a,
+# which is ILP32 and gives that for nothing, and --target android-arm64 is
+# arm64-v8a, which gets it from clang's __ptr32 (src/port_ptr.h). A stock
+# clang ignores that attribute on AArch64, so the arm64 build needs the one
+# tools/pc/build_android_deps.py builds from
+# tools/pc/android/llvm-aarch64-ptr32.patch, and checks for it with a probe
+# rather than trusting a path. One APK carries both (tools/pc/build_apk.py).
+#
+# tools/pc/build_android_deps.py also fetches the NDK and the SDK and builds
+# SDL3, FreeType and libpng, per ABI, into tmp/pc/android-deps;
+# ANDROID_NDK and ANDROID_HOME are honoured when set.
 ANDROID_DEPS = os.environ.get("MEMORIES_ANDROID_DEPS") or "tmp/pc/android-deps"
 # API 28 (Android 9) is the floor: bionic gained iconv there, which the
 # kanji ROM's Shift-JIS conversion needs (src/pc/sdk/libapi_krom.c), and
 # posix_spawn, and every device with 32-bit support is well past it.
 # memfd_create arrived later still and is called as a syscall instead.
 ANDROID_API = 28
-ANDROID_ABI = "armeabi-v7a"
+ANDROID_ABI = "arm64-v8a" if ANDROID64 else "armeabi-v7a"
+ANDROID_TRIPLE = f"aarch64-linux-android{ANDROID_API}" if ANDROID64 else \
+                 f"armv7a-linux-androideabi{ANDROID_API}"
 ANDROID_NDK = os.environ.get("ANDROID_NDK") or f"{ANDROID_DEPS}/ndk"
 ANDROID_BIN = f"{ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+ANDROID_SYSROOT = f"{ANDROID_NDK}/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+# The arm64 build's compiler is the patched one; the NDK's own ignores
+# __ptr32 on AArch64. MEMORIES_ANDROID_CLANG names another.
+ANDROID_LLVM = os.environ.get("MEMORIES_ANDROID_CLANG") or f"{ANDROID_DEPS}/llvm/bin/clang"
+ANDROID_LIBS = f"{ANDROID_DEPS}/{ANDROID_ABI}"
 if WINDOWS:
     CC, OBJCOPY, NM, READELF, OBJDUMP = ("i686-w64-mingw32-clang", "llvm-objcopy", "llvm-nm",
                                          "llvm-readelf", "llvm-objdump")
 elif ANDROID:
-    CC = f"{ANDROID_BIN}/armv7a-linux-androideabi{ANDROID_API}-clang"
+    # The NDK's driver knows its own sysroot; the patched clang is told.
+    CC = ANDROID_LLVM if ANDROID64 else f"{ANDROID_BIN}/{ANDROID_TRIPLE}-clang"
     OBJCOPY, NM, READELF, OBJDUMP = (f"{ANDROID_BIN}/llvm-objcopy", f"{ANDROID_BIN}/llvm-nm",
                                      f"{ANDROID_BIN}/llvm-readelf", f"{ANDROID_BIN}/llvm-objdump")
 else:
@@ -72,6 +88,26 @@ if WINDOWS:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import build_win32_deps
     build_win32_deps.use_toolchain()
+def android_probe():
+    """The arm64 build's one requirement of its compiler: a __ptr32 member
+    four bytes wide. A stock clang accepts the attribute on AArch64 and
+    ignores it, which would lay every guest structure out wrong with no
+    diagnostic, so this is checked rather than assumed (src/port_ptr.h)."""
+    source = ("struct S { char *__ptr32 __uptr p; };\n"
+              "_Static_assert(sizeof(struct S) == 4, \"\");\n")
+    if not os.path.exists(CC):
+        sys.exit(f"{CC} is missing: run tools/pc/build_android_deps.py --with-llvm")
+    probe = subprocess.run([CC, f"--target={ANDROID_TRIPLE}", f"--sysroot={ANDROID_SYSROOT}",
+                            "-fms-extensions", "-ffreestanding", "-fsyntax-only", "-xc", "-"],
+                           input=source, text=True, capture_output=True)
+    if probe.returncode:
+        sys.exit(f"{CC} has no 32-bit guest pointer on AArch64: a __ptr32 member is not four "
+                 "bytes wide, so every guest structure would be laid out wrong. Build the "
+                 "patched clang with tools/pc/build_android_deps.py --with-llvm "
+                 "(tools/pc/android/llvm-aarch64-ptr32.patch), or point "
+                 "MEMORIES_ANDROID_CLANG at one.")
+
+
 if sys.platform == "win32":
     # The paths below are written, compared and turned into object names
     # with forward slashes; Windows glob returns backslashes.
@@ -113,9 +149,16 @@ elif ANDROID:
     # patch room src/pc/mods/hooks.c needs, so a code mod cannot hook a game
     # function on Android; data mods (cards, textures, music, tables) are
     # unaffected.
-    CFLAGS = [f for f in CFLAGS if f not in ("-m32", "-fno-pie", "-fpermissive",
-                                             "-fpatchable-function-entry=8,6")] + [
-        "-fPIC", "-marm", "-fvisibility=hidden", "-Wno-incompatible-pointer-types"]
+    # arm64 keeps -fpatchable-function-entry, which clang implements for
+    # AArch64 though not for 32-bit ARM, so the patch room a code mod hooks
+    # through is there (src/pc/mods/hooks.c). -marm is 32-bit ARM's: A64 is
+    # the only instruction set on arm64. The patched clang is a plain one, so
+    # it is told its target and sysroot.
+    CFLAGS = [f for f in CFLAGS if f not in ("-m32", "-fno-pie", "-fpermissive")
+              and (ANDROID64 or f != "-fpatchable-function-entry=8,6")] + [
+        "-fPIC", "-fvisibility=hidden", "-Wno-incompatible-pointer-types"] + (
+        [f"--target={ANDROID_TRIPLE}", f"--sysroot={ANDROID_SYSROOT}", "-fms-extensions",
+         "-DMEMORIES_AARCH64_PTR32"] if ANDROID64 else ["-marm"])
 # -O0 for game units: original busy-waits poll non-volatile globals that the
 # VBlank handler updates, and must not be hoisted out of their loops.
 NATIVE_CFLAGS = ["-m32", "-std=gnu11", "-O2", "-g", "-Wall", "-fno-pie", "-fno-omit-frame-pointer", "-fno-strict-aliasing",
@@ -139,9 +182,11 @@ elif ANDROID:
     # from shared storage.
     NATIVE_CFLAGS = [f for f in NATIVE_CFLAGS if f not in ("-m32", "-fno-pie", "-I/usr/include/freetype2",
                                                            "-Wno-builtin-declaration-mismatch")] + [
-        "-fPIC", "-marm", "-fvisibility=hidden",
-        f"-I{ANDROID_DEPS}/include", f"-I{ANDROID_DEPS}/include/freetype2",
-        f"-I{ANDROID_DEPS}/sdl/include"]
+        "-fPIC", "-fvisibility=hidden",
+        f"-I{ANDROID_LIBS}/include", f"-I{ANDROID_LIBS}/include/freetype2",
+        f"-I{ANDROID_LIBS}/sdl/include"] + (
+        [f"--target={ANDROID_TRIPLE}", f"--sysroot={ANDROID_SYSROOT}", "-fms-extensions",
+         "-DMEMORIES_AARCH64_PTR32"] if ANDROID64 else ["-marm"])
 # Every unit's indirect calls and jumps go through __x86_indirect_thunk_<reg>
 # (src/pc/guest/branch_thunks.c), which sends a target in guest memory to its
 # native function: tables in the retail data image hold MIPS addresses, and
@@ -174,8 +219,10 @@ BACKEND_SOURCES = sorted(sum(BACKENDS.values(), []))
 # The guest glue keeps one assembly file per architecture; the others are not
 # this build's (src/pc/guest/state_arm.S, state_i386.S).
 ARCH_GLUE = {"i386": ["src/pc/guest/setjmp_i386.S", "src/pc/guest/state_i386.S"],
-             "arm": ["src/pc/guest/setjmp_arm.S", "src/pc/guest/state_arm.S"]}
-OTHER_GLUE = set(sum(ARCH_GLUE.values(), [])) - set(ARCH_GLUE["arm" if ANDROID else "i386"])
+             "arm": ["src/pc/guest/setjmp_arm.S", "src/pc/guest/state_arm.S"],
+             "arm64": ["src/pc/guest/setjmp_arm64.S", "src/pc/guest/state_arm64.S"]}
+THIS_ARCH = "arm64" if ANDROID64 else "arm" if ANDROID else "i386"
+OTHER_GLUE = set(sum(ARCH_GLUE.values(), [])) - set(ARCH_GLUE[THIS_ARCH])
 NATIVE = sorted([f for f in glob.glob("src/pc/guest/*.[cS]") if f not in OTHER_GLUE] + glob.glob("src/pc/sdk/*.c") +
                 [f for f in glob.glob("src/pc/platform/*.c") if f not in BACKEND_SOURCES] + glob.glob("src/pc/overlays/*.c") + glob.glob("src/pc/overrides/*.c") + glob.glob("src/pc/audio/*.c") + glob.glob("src/pc/mods/*.c") + glob.glob("src/pc/debug/*.c") + glob.glob("src/pc/cards/*.c") + glob.glob("src/pc/free_duel/*.c") + glob.glob("src/pc/saves/*.c") + glob.glob("src/pc/text/*.c") + ["src/pc/render/soft_gpu.c", "src/pc/render/texture_dump.c", "src/pc/render/texture_pack.c"]) + [
     "src/pc/rng.c", "src/pc/compat/fs.c", "src/pc/compat/gte.c", "src/pc/compat/pgxp.c", "src/pc/compat/libgs_ot.c", "src/pc/compat/android_libc.c", "src/pc/render/packets.c"]
@@ -362,7 +409,15 @@ def write_guest_branches(build, branches):
     branch thunks' resolver (src/pc/guest/branch_thunks.c)."""
     with open(f"{build}/guest_branches.c", "w") as handle:
         handle.write("/* Written by tools/pc/build_game32.py. */\nextern void Memories_GuestBranchDirect(void);\n")
-        if ANDROID:
+        if ANDROID64:
+            # movz/movk rather than a literal: a guest address is a plain
+            # 32-bit number, so it needs no relocation and no pool.
+            handle.writelines(f'__asm__(".text\\n.globl {name}\\n.type {name}, %function\\n{name}:\\n'
+                              f'    movz x16, #0x{address & 0xFFFF:04X}\\n'
+                              f'    movk x16, #0x{address >> 16:04X}, lsl #16\\n'
+                              f'    b Memories_GuestBranchDirect\\n");\n'
+                              for name, address in sorted(branches.items()))
+        elif ANDROID:
             # movw/movt rather than a literal pool: the address is a plain
             # number, so it needs no relocation and no .ltorg between stubs.
             # r12 is where Memories_GuestBranchDirect reads it from, and is
@@ -700,12 +755,14 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--backend", choices=list(BACKENDS), default=os.environ.get("MEMORIES_BACKEND") or
                         "sdl")
-    parser.add_argument("--target", choices=("linux", "windows", "android"), default=TARGET)
+    parser.add_argument("--target", choices=("linux", "windows", "android", "android-arm64"),
+                        default=TARGET)
     parser.add_argument("--release", action="store_true",
                         help="Windows GUI executable; omit the optional disc-derived executable icon")
     # A Windows build made on Linux gets a directory of its own, so both
     # executables and their objects sit side by side.
     parser.add_argument("--build", default="tmp/pc/win32" if WINDOWS and sys.platform != "win32" else
+                        "tmp/pc/android-arm64" if ANDROID64 else
                         "tmp/pc/android" if ANDROID else "tmp/pc/game32")
     options = parser.parse_args()
     NATIVE.extend(BACKENDS[options.backend])
@@ -721,9 +778,12 @@ def main():
     elif ANDROID:
         if options.backend != "sdl":
             sys.exit("Android builds use the SDL backend")
-        for needed in (CC, f"{ANDROID_DEPS}/sdl/lib/libSDL3.so", f"{ANDROID_DEPS}/lib/libfreetype.a"):
+        for needed in (CC, f"{ANDROID_LIBS}/sdl/lib/libSDL3.so", f"{ANDROID_LIBS}/lib/libfreetype.a"):
             if not os.path.exists(needed):
-                sys.exit(f"{needed} is missing: run tools/pc/build_android_deps.py")
+                sys.exit(f"{needed} is missing: run tools/pc/build_android_deps.py "
+                         f"--abi {ANDROID_ABI}")
+        if ANDROID64:
+            android_probe()
     else:
         # The Debian libraries and SDL3, fetched and built the first time.
         build_linux_sysroot.main()
@@ -1055,13 +1115,18 @@ def main():
         with open(exports, "w") as handle:
             handle.write("/* Written by tools/pc/build_game32.py. */\n")
             handle.write("{ global: SDL_*; Java_*; local: *; };\n")
-        run([CC, "-shared", "-marm", "-o", output,
+        # The patched clang is the compiler, not the toolchain: -B points it at
+        # the NDK's ld.lld and the rest, which is the same linker the
+        # armeabi-v7a build uses. Nothing in the patch concerns linking.
+        run([CC, "-shared", *([f"--target={ANDROID_TRIPLE}", f"--sysroot={ANDROID_SYSROOT}",
+                               f"-B{ANDROID_BIN}", "-fuse-ld=lld"]
+                             if ANDROID64 else ["-marm"]), "-o", output,
              *[obj(s) for s in game + NATIVE],
              f"{options.build}/stubs.o", guest_branches, f"{options.build}/mod_exports.o", version,
              f"{options.build}/guest_symbols.ld", f"-Wl,--version-script={exports}",
              "-Wl,-z,noexecstack", "-Wl,--no-undefined",
-             f"{ANDROID_DEPS}/sdl/lib/libSDL3.so",
-             f"{ANDROID_DEPS}/lib/libfreetype.a", f"{ANDROID_DEPS}/lib/libpng16.a",
+             f"{ANDROID_LIBS}/sdl/lib/libSDL3.so",
+             f"{ANDROID_LIBS}/lib/libfreetype.a", f"{ANDROID_LIBS}/lib/libpng16.a",
              "-lz", "-lGLESv2", "-lEGL", "-llog", "-landroid", "-lm", "-ldl"])
     else:
         # Mods bind through mod_exports.o, so nothing needs -rdynamic.

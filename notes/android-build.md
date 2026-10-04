@@ -6,19 +6,26 @@ loaded by an activity that is SDL3's with a little added
 their own disc image, as on the desktop.
 
 ```sh
-python3 tools/pc/build_android_deps.py          # the NDK, the SDK, SDL3, FreeType, libpng
-python3 tools/pc/build_game32.py --target android
-python3 tools/pc/build_apk.py                  # tmp/pc/android/memories.apk
+# once: the NDK, the SDK, and SDL3, FreeType and libpng per ABI
+python3 tools/pc/build_android_deps.py --abi armeabi-v7a
+python3 tools/pc/build_android_deps.py --abi arm64-v8a --with-llvm
+
+python3 tools/pc/build_game32.py --target android          # armeabi-v7a
+python3 tools/pc/build_game32.py --target android-arm64    # arm64-v8a
+python3 tools/pc/build_apk.py          # tmp/pc/android/memories.apk, both ABIs
 adb install -r tmp/pc/android/memories.apk
 ```
 
-The first command needs about 4 GB under `tmp/pc/android-deps` and only runs
-once; `ANDROID_NDK` and `ANDROID_HOME` are used when they already name an
+`build_apk.py` packs whichever ABIs have been built, so either alone makes a
+working APK; both together make one that installs on a 32-bit device and on a
+64-bit-only one alike. `--with-llvm` is the arm64 build's compiler and is
+what costs: some tens of minutes and about 25 GB, against about 4 GB for the
+rest. `ANDROID_NDK` and `ANDROID_HOME` are used when they already name an
 installation. The build is the same kind of thing as the other two: Python
 drivers calling the SDK's own tools, no Gradle and no project files to keep in
 step.
 
-## Why 32-bit ARM
+## The two ABIs
 
 The port's memory model is ILP32 (`src/pc/guest/image.h`): the 2 MiB of PS1
 RAM is mapped at its retail KSEG0 address, game globals are linked at their
@@ -40,10 +47,10 @@ struct S { unsigned char *__ptr32 __uptr p; };
 _Static_assert(sizeof(struct S) == 4, "");   /* x86-64: passes. AArch64: fails at 8 */
 ```
 
-The cost of shipping `armeabi-v7a` alone is that devices with no 32-bit
-support -- Pixel 7 and later, and a good deal of what shipped after it --
-cannot install it at all: the APK declares `armeabi-v7a` and nothing else, so
-such a device calls it incompatible.
+`armeabi-v7a` alone is not enough: devices with no 32-bit support -- Pixel 7
+and later, and a good deal of what shipped after it -- cannot install such an
+APK at all, and say only that it is incompatible. Hence `arm64-v8a` as well,
+which needs everything below.
 
 ## AArch64
 
@@ -135,19 +142,49 @@ native -- the matching build included, which must keep its tokens unchanged.
 `src/overlays/duel_effects/effect_22.c` has the same shape but names a pinned
 symbol, so it is already an absolute 32-bit address and links as it stands.
 
-**What else is missing for an arm64 APK**, none of it compiler work:
+### What the arm64 build needed besides the compiler
 
-  * the guest glue, in A64: the fault handler's redirect (`uc_mcontext.pc`),
-    `Memories_GuestBranchDirect`, the context switch, and an emulator for the
-    one faulting access below 0x10000 (A64 encodings, not A32);
-  * `Psx_setjmp`. This one needs a different answer from the other two
-    architectures: the game's `jmp_buf` is the Psy-Q `int[12]`, 48 bytes at a
-    fixed guest address, and i386 used six words of it while 32-bit ARM used
-    ten. AAPCS64's callee-saved set is x19-x28, fp, lr and sp -- 104 bytes,
-    which does not fit. The registers will have to live in a native table
-    with only a token in the buffer, keyed by its guest address;
-  * SDL3, FreeType and libpng for `arm64-v8a`, which is the deps script with
-    another ABI, and then one APK can carry both.
+Four parts of the port do not translate, and each is replaced by one that
+does the same thing:
+
+**`Psx_setjmp`** (`src/pc/guest/setjmp_arm64.S`). The game's `jmp_buf` is the
+Psy-Q `int[12]`, 48 bytes at a retail guest address; i386 kept six words
+there and 32-bit ARM ten, but AAPCS64's callee-saved state is x19-x28, fp, lr
+and sp -- 104 bytes, which does not fit, and the buffer cannot grow because it
+is retail guest memory. So the registers live in `Memories_JumpState`, an area
+of their own in state.c, and the buffer keeps a token saying it was set. One
+area is enough because the game has exactly one `jmp_buf`: `setjmp` is called
+once, in `Main_Init`, and all three `longjmp`s name `D_800E9DC0`. A `longjmp`
+through a buffer no `setjmp` filled is reported rather than obeyed.
+
+**`D_80180004`** (`src/pc/compat/guest_fn.h`), the main menu's comparator
+table, which stores six function pointers in four-byte slots. A native
+address does not fit in four bytes when the library is placed where the
+loader likes, and the link says so: "R_AARCH64_ABS32 cannot be used against
+symbol". `GUEST_FN` stores the retail guest address instead -- which is what
+the retail image holds -- and a call through it faults into the native
+function the way every other table of MIPS addresses in guest memory does. It
+is the plain function name wherever pointers are four bytes anyway, the
+matching build included.
+
+**The Psy-Q `long`.** `PSXLONG` is `int` in an LP64 build and `long`
+everywhere else (src/port_ptr.h), so sixteen definitions under `src/pc/sdk/`
+that spelled `long` disagreed with their own declarations in `src/psyq/`.
+They say `PSXLONG` now, which is the same type in every 32-bit build.
+
+**Mod objects.** `src/pc/mods/object_loader.c` reads the ELF32 shapes --
+40-byte section headers, 16-byte symbols -- so a 64-bit build refuses a mod
+object outright rather than misread one. Writing the ELF64 half is what it
+would take; `-fpatchable-function-entry` does work on AArch64, unlike 32-bit
+ARM, so the patch room a hook needs is there whenever that is done.
+
+The rest is the 32-bit ARM port with A64's registers and encodings:
+`state_arm64.S` (`VSync`, `Memories_StateReturn` and the context switch, with
+d8-d15 as well, which AAPCS64 also calls callee-saved), the fault handler's
+redirect through `uc_mcontext.pc`, `Memories_GuestBranchDirect`, and an
+emulator for the one faulting access below 0x10000 in A64 encodings. A64
+reaches its own globals with `adrp`/`:lo12:`, resolved at link time for a
+hidden symbol, which is tidier than the literal pool 32-bit ARM needs.
 
 ## What the ARM port needed
 

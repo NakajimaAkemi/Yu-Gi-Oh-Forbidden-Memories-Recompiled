@@ -7,9 +7,11 @@ in tmp/pc/android and wraps it:
   * the resources and the manifest go through aapt2 (android/);
   * SDL3's Java glue and the activity (android/java) are compiled against
     android.jar and dexed with d8;
-  * libmemories.so and libSDL3.so go in lib/armeabi-v7a/, and the mods and
-    the languages -- what a desktop release ships beside the executable --
-    go in assets/, which the activity unpacks on first start;
+  * every ABI that has been built goes in lib/<abi>/, each with its own
+    libmemories.so and libSDL3.so, so one APK installs on a 32-bit device
+    and on a 64-bit-only one alike; the mods and the languages -- what a
+    desktop release ships beside the executable -- go in assets/, which the
+    activity unpacks on first start;
   * zipalign and apksigner finish it.
 
 No Gradle: the SDK's own tools do each step, which keeps the Android build the
@@ -28,7 +30,10 @@ SDK = os.environ.get("ANDROID_HOME") or f"{DEPS}/sdk"
 BUILD_TOOLS_VERSION = os.environ.get("MEMORIES_ANDROID_BUILD_TOOLS") or "34.0.0"
 PLATFORM = os.environ.get("MEMORIES_ANDROID_PLATFORM") or "android-34"
 MIN_SDK, TARGET_SDK = 28, 34
-ABI = "armeabi-v7a"
+# Where tools/pc/build_game32.py leaves each ABI's library. One that has not
+# been built is left out rather than being an error: a 32-bit-only APK is
+# still useful, and the arm64 one needs the patched clang.
+ABI_BUILDS = {"armeabi-v7a": "tmp/pc/android", "arm64-v8a": "tmp/pc/android-arm64"}
 
 
 def run(command, **kwargs):
@@ -57,8 +62,9 @@ def java_sources(*roots):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--build", default="tmp/pc/android", help="where build_game32.py put the library")
-    parser.add_argument("--out", default=None, help="the APK to write (default <build>/memories.apk)")
+    parser.add_argument("--abi", action="append", choices=list(ABI_BUILDS),
+                        help="only this ABI (repeatable; default every one that is built)")
+    parser.add_argument("--out", default="tmp/pc/android/memories.apk", help="the APK to write")
     # Not under the dependencies: re-fetching those would make a new key, and
     # an APK signed with a different one than the copy already on the device
     # cannot replace it -- Android refuses it as "App not installed" until the
@@ -66,16 +72,26 @@ def main():
     parser.add_argument("--keystore", default="tmp/pc/android-debug.keystore")
     options = parser.parse_args()
     os.chdir(ROOT)
-    build = options.build
-    out = options.out or f"{build}/memories.apk"
-    work = f"{build}/apk"
+    wanted = options.abi or list(ABI_BUILDS)
+    abis = {abi: ABI_BUILDS[abi] for abi in wanted
+            if os.path.exists(f"{ABI_BUILDS[abi]}/libmemories.so")}
+    if not abis:
+        sys.exit("no library to package: run tools/pc/build_game32.py --target android "
+                 "(and --target android-arm64 for the 64-bit one) first")
+    # The assets are the same whichever ABI built them.
+    build = next(iter(abis.values()))
+    out = options.out
+    work = "tmp/pc/apk"
     android_jar = f"{SDK}/platforms/{PLATFORM}/android.jar"
-    library = f"{build}/libmemories.so"
-    for needed in (library, android_jar, f"{DEPS}/sdl/lib/libSDL3.so", f"{DEPS}/sdl/java"):
+    for abi in abis:
+        sdl = f"{DEPS}/{abi}/sdl/lib/libSDL3.so"
+        if not os.path.exists(sdl):
+            sys.exit(f"{sdl} is missing: run tools/pc/build_android_deps.py --abi {abi}")
+    # SDL's Java glue is the same for every ABI; take the first one's.
+    sdl_java = f"{DEPS}/{next(iter(abis))}/sdl/java"
+    for needed in (android_jar, sdl_java):
         if not os.path.exists(needed):
-            sys.exit(f"{needed} is missing: "
-                     + ("run tools/pc/build_game32.py --target android first" if needed == library
-                        else "run tools/pc/build_android_deps.py"))
+            sys.exit(f"{needed} is missing: run tools/pc/build_android_deps.py")
     shutil.rmtree(work, ignore_errors=True)
     os.makedirs(f"{work}/classes", exist_ok=True)
 
@@ -94,7 +110,7 @@ def main():
          f"{work}/res.zip"])
 
     # SDL's Java glue and the activity.
-    sources = java_sources(f"{DEPS}/sdl/java", "android/java")
+    sources = java_sources(sdl_java, "android/java")
     run(["javac", "-nowarn", "-source", "8", "-target", "8", "-bootclasspath", android_jar,
          "-classpath", android_jar, "-d", f"{work}/classes", *sources])
     classes = sorted(glob.glob(f"{work}/classes/**/*.class", recursive=True))
@@ -107,8 +123,9 @@ def main():
     with zipfile.ZipFile(f"{work}/unaligned.apk", "a", zipfile.ZIP_DEFLATED) as apk:
         for dex in sorted(glob.glob(f"{work}/dex/*.dex")):
             apk.write(dex, os.path.basename(dex))
-        apk.write(library, f"lib/{ABI}/libmemories.so")
-        apk.write(f"{DEPS}/sdl/lib/libSDL3.so", f"lib/{ABI}/libSDL3.so")
+        for abi, abi_build in abis.items():
+            apk.write(f"{abi_build}/libmemories.so", f"lib/{abi}/libmemories.so")
+            apk.write(f"{DEPS}/{abi}/sdl/lib/libSDL3.so", f"lib/{abi}/libSDL3.so")
 
     run([tool("zipalign"), "-f", "4", f"{work}/unaligned.apk", f"{work}/aligned.apk"])
     if not os.path.exists(options.keystore):
@@ -130,7 +147,7 @@ def main():
     # is what gets checked.
     run([tool("zipalign"), "-c", "4", out])
     size = os.path.getsize(out)
-    print(f"{out}: {size // 1024} KiB, {ABI}, minSdk {MIN_SDK}")
+    print(f"{out}: {size // 1024} KiB, {', '.join(abis)}, minSdk {MIN_SDK}")
     print("install it with: adb install -r " + out)
 
 
