@@ -40,11 +40,80 @@ struct S { unsigned char *__ptr32 __uptr p; };
 _Static_assert(sizeof(struct S) == 4, "");   /* x86-64: passes. AArch64: fails at 8 */
 ```
 
-So a 64-bit Android port needs the guest pointers made explicit in the source,
-not an attribute, and that is a much larger piece of work than this one.
 The cost of shipping `armeabi-v7a` alone is that devices with no 32-bit
-support -- Pixel 7 and later, and some other recent flagships -- cannot run
-it.
+support -- Pixel 7 and later, and a good deal of what shipped after it --
+cannot install it at all: the APK declares `armeabi-v7a` and nothing else, so
+such a device calls it incompatible.
+
+## AArch64
+
+Making the source carry 32-bit pointers of its own, instead of the attribute,
+is not the way out. There are 399 G32 members across 147 structures, and every
+dereference of them runs through the 604 game units -- but the real obstacle
+is that these sources are shared with the byte-matching PS1 build, where G32
+expands to nothing so the MIPS objects stay identical. A 32-bit handle type
+cannot be invisible like that. So 64-bit has to come from the compiler.
+
+**The source side is already done.** Comparing clang's record layouts for the
+ILP32 build against the same headers with G32 live, 21,374 records compared,
+exactly one game structure differed -- `MainMenuComparators`, which is now
+annotated. Nothing else in the game needs changing for a 64-bit build.
+
+**The compiler side is four small things**, in
+`tools/pc/android/llvm-aarch64-ptr32.patch` (100 lines, against
+llvmorg-19.1.7):
+
+  * clang's AArch64 target gains the address-space map x86 has, so
+    `__ptr32 __uptr` reaches the IR as `ptr addrspace(271)` instead of being
+    dropped. This is where a stock clang loses it: the mapping in
+    `SemaType.cpp` is target-agnostic and does produce `LangAS::ptr32_uptr`,
+    but the target's map then sends it to address space 0;
+  * `getPointerWidthV` returns 32 for 270 and 271, and the data layouts gain
+    `p270:32:32-p271:32:32-p272:64:64`, in clang and in the backend;
+  * `AArch64TargetMachine::isNoopAddrSpaceCast` was returning `true`
+    unconditionally. Left alone it folds the casts away before they are
+    lowered, which is wrong the moment one changes a pointer's width;
+  * `LowerADDRSPACECAST`. This is where AArch64 differs from x86 and where a
+    port of x86's code does not work: `AArch64TargetLowering::getPointerTy`
+    returns i64 for every address space on purpose, so that the addressing
+    modes stay usable, and narrows a pointer only where it is stored. So the
+    cast moves no bits in the common direction -- a store through a 32-bit
+    space writes four bytes by itself, a load from one brings in four with the
+    top half undefined -- and all that is left is extending the low half when
+    a 32-bit pointer becomes a full address. x86 needs the opposite shape, and
+    needs its loads and stores rewritten to cast the base pointer first;
+    AArch64 needs neither.
+
+With that, `struct S { char *__ptr32 __uptr p; }` is four bytes on AArch64,
+the game's 21,374 record layouts match the ILP32 build exactly, and the code
+is what it should be:
+
+```
+read_through:            write_through:
+    ldr  w8, [x0]            str  w1, [x0]
+    ldrb w0, [x8, #4]        ret
+    ret
+```
+
+`ldr w8` zero-extends into `x8` for free, so the extend folds away entirely.
+
+`MEMORIES_AARCH64_PTR32` is how a build says it has such a compiler; without
+it `src/port_ptr.h` stops an AArch64 build with an #error rather than let it
+compile with every structure laid out wrong.
+
+**What is still missing for an arm64 APK**, none of it compiler work:
+
+  * the guest glue, in A64: the fault handler's redirect (`uc_mcontext.pc`),
+    `Memories_GuestBranchDirect`, the context switch, and an emulator for the
+    one faulting access below 0x10000 (A64 encodings, not A32);
+  * `Psx_setjmp`. This one needs a different answer from the other two
+    architectures: the game's `jmp_buf` is the Psy-Q `int[12]`, 48 bytes at a
+    fixed guest address, and i386 used six words of it while 32-bit ARM used
+    ten. AAPCS64's callee-saved set is x19-x28, fp, lr and sp -- 104 bytes,
+    which does not fit. The registers will have to live in a native table
+    with only a token in the buffer, keyed by its guest address;
+  * SDL3, FreeType and libpng for `arm64-v8a`, which is the deps script with
+    another ABI, and then one APK can carry both.
 
 ## What the ARM port needed
 

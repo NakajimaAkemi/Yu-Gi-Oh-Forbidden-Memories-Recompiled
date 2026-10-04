@@ -1,0 +1,214 @@
+diff --git a/clang/lib/Basic/Targets/AArch64.cpp b/clang/lib/Basic/Targets/AArch64.cpp
+index 63fc15f91..2a1893743 100644
+--- a/clang/lib/Basic/Targets/AArch64.cpp
++++ b/clang/lib/Basic/Targets/AArch64.cpp
+@@ -132,6 +132,7 @@ void AArch64TargetInfo::setArchFeatures() {
+ AArch64TargetInfo::AArch64TargetInfo(const llvm::Triple &Triple,
+                                      const TargetOptions &Opts)
+     : TargetInfo(Triple), ABI("aapcs") {
++  AddrSpaceMap = &AArch64AddrSpaceMap;
+   if (getTriple().isOSOpenBSD()) {
+     Int64Type = SignedLongLong;
+     IntMaxType = SignedLongLong;
+@@ -1520,7 +1521,7 @@ void AArch64leTargetInfo::setDataLayout() {
+     else
+       resetDataLayout("e-m:o-i64:64-i128:128-n32:64-S128-Fn32", "_");
+   } else
+-    resetDataLayout("e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
++    resetDataLayout("e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
+ }
+ 
+ void AArch64leTargetInfo::getTargetDefines(const LangOptions &Opts,
+@@ -1543,7 +1544,7 @@ void AArch64beTargetInfo::getTargetDefines(const LangOptions &Opts,
+ 
+ void AArch64beTargetInfo::setDataLayout() {
+   assert(!getTriple().isOSBinFormatMachO());
+-  resetDataLayout("E-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
++  resetDataLayout("E-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32");
+ }
+ 
+ WindowsARM64TargetInfo::WindowsARM64TargetInfo(const llvm::Triple &Triple,
+diff --git a/clang/lib/Basic/Targets/AArch64.h b/clang/lib/Basic/Targets/AArch64.h
+index 526f7f30a..7fdb0bb47 100644
+--- a/clang/lib/Basic/Targets/AArch64.h
++++ b/clang/lib/Basic/Targets/AArch64.h
+@@ -21,6 +21,35 @@
+ namespace clang {
+ namespace targets {
+ 
++// The MS __ptr32/__ptr64 pointer-size attributes, as x86 has them: a pointer
++// the program stores in four bytes while the host's own are eight. Mapped to
++// the same target address spaces x86 uses, which are target-private numbers.
++static const unsigned AArch64AddrSpaceMap[] = {
++    0,   // Default
++    0,   // opencl_global
++    0,   // opencl_local
++    0,   // opencl_constant
++    0,   // opencl_private
++    0,   // opencl_generic
++    0,   // opencl_global_device
++    0,   // opencl_global_host
++    0,   // cuda_device
++    0,   // cuda_constant
++    0,   // cuda_shared
++    0,   // sycl_global
++    0,   // sycl_global_device
++    0,   // sycl_global_host
++    0,   // sycl_local
++    0,   // sycl_private
++    270, // ptr32_sptr
++    271, // ptr32_uptr
++    272, // ptr64
++    0,   // hlsl_groupshared
++    // Wasm address space values for this target are dummy values,
++    // as it is only enabled for Wasm targets.
++    20, // wasm_funcref
++};
++
+ class LLVM_LIBRARY_VISIBILITY AArch64TargetInfo : public TargetInfo {
+   virtual void setDataLayout() = 0;
+   static const TargetInfo::GCCRegAlias GCCRegAliases[];
+@@ -96,8 +125,23 @@ class LLVM_LIBRARY_VISIBILITY AArch64TargetInfo : public TargetInfo {
+   std::string ABI;
+ 
+ public:
++  enum AddrSpace { ptr32_sptr = 270, ptr32_uptr = 271, ptr64 = 272 };
++
+   AArch64TargetInfo(const llvm::Triple &Triple, const TargetOptions &Opts);
+ 
++  uint64_t getPointerWidthV(LangAS AS) const override {
++    unsigned TargetAddrSpace = getTargetAddressSpace(AS);
++    if (TargetAddrSpace == ptr32_sptr || TargetAddrSpace == ptr32_uptr)
++      return 32;
++    if (TargetAddrSpace == ptr64)
++      return 64;
++    return PointerWidth;
++  }
++
++  uint64_t getPointerAlignV(LangAS AddrSpace) const override {
++    return getPointerWidthV(AddrSpace);
++  }
++
+   StringRef getABI() const override;
+   bool setABI(const std::string &Name) override;
+ 
+diff --git a/llvm/lib/Target/AArch64/AArch64.h b/llvm/lib/Target/AArch64/AArch64.h
+index ff19327c6..4aff7b867 100644
+--- a/llvm/lib/Target/AArch64/AArch64.h
++++ b/llvm/lib/Target/AArch64/AArch64.h
+@@ -112,6 +112,12 @@ void initializeLDTLSCleanupPass(PassRegistry&);
+ void initializeSMEABIPass(PassRegistry &);
+ void initializeSVEIntrinsicOptsPass(PassRegistry &);
+ void initializeAArch64Arm64ECCallLoweringPass(PassRegistry &);
++namespace AArch64AS {
++// The MS __ptr32/__ptr64 pointer-size spaces, numbered as x86 numbers them
++// (X86AS): a pointer the program keeps in four bytes, widened when used.
++enum : unsigned { PTR32_SPTR = 270, PTR32_UPTR = 271, PTR64 = 272 };
++} // End AArch64AS namespace
++
+ } // end namespace llvm
+ 
+ #endif
+diff --git a/llvm/lib/Target/AArch64/AArch64ISelLowering.cpp b/llvm/lib/Target/AArch64/AArch64ISelLowering.cpp
+index ef2789e96..6527a396a 100644
+--- a/llvm/lib/Target/AArch64/AArch64ISelLowering.cpp
++++ b/llvm/lib/Target/AArch64/AArch64ISelLowering.cpp
+@@ -627,6 +627,10 @@ AArch64TargetLowering::AArch64TargetLowering(const TargetMachine &TM,
+   // BlockAddress
+   setOperationAction(ISD::BlockAddress, MVT::i64, Custom);
+ 
++  // Casting to or from the __ptr32/__ptr64 spaces changes a pointer's width,
++  // so it is a real extend or truncate (LowerADDRSPACECAST).
++  setOperationAction(ISD::ADDRSPACECAST, MVT::i64, Custom);
++
+   // AArch64 lacks both left-rotate and popcount instructions.
+   setOperationAction(ISD::ROTL, MVT::i32, Expand);
+   setOperationAction(ISD::ROTL, MVT::i64, Expand);
+@@ -6742,6 +6746,38 @@ SDValue AArch64TargetLowering::LowerINIT_TRAMPOLINE(SDValue Op,
+   return CallResult.second;
+ }
+ 
++// A cast to or from one of the __ptr32/__ptr64 spaces (270-272).
++//
++// AArch64 keeps every pointer in a 64-bit DAG value whatever its address
++// space -- see getPointerTy, which returns i64 unconditionally so that the
++// addressing modes stay usable -- and narrows one only where it is stored.
++// So this cast moves no bits in the common direction: a store through a
++// 32-bit space writes four bytes by itself, and a load from one brings in
++// four with the top half undefined.
++//
++// What is left is the direction that makes a full address out of a 32-bit
++// pointer, where the low half has to be extended: unsigned for __uptr,
++// signed for __sptr. Doing it here rather than at the load is what makes the
++// undefined top half safe.
++static SDValue LowerADDRSPACECAST(SDValue Op, SelectionDAG &DAG) {
++  SDLoc dl(Op);
++  SDValue Src = Op.getOperand(0);
++  MVT DstVT = Op.getSimpleValueType();
++
++  AddrSpaceCastSDNode *N = cast<AddrSpaceCastSDNode>(Op.getNode());
++  unsigned SrcAS = N->getSrcAddressSpace();
++
++  assert(SrcAS != N->getDestAddressSpace() &&
++         "addrspacecast must be between different address spaces");
++
++  if (SrcAS == AArch64AS::PTR32_UPTR)
++    return DAG.getZeroExtendInReg(Src, dl, MVT::i32);
++  if (SrcAS == AArch64AS::PTR32_SPTR)
++    return DAG.getNode(ISD::SIGN_EXTEND_INREG, dl, DstVT, Src,
++                       DAG.getValueType(MVT::i32));
++  return Src;
++}
++
+ SDValue AArch64TargetLowering::LowerOperation(SDValue Op,
+                                               SelectionDAG &DAG) const {
+   LLVM_DEBUG(dbgs() << "Custom lowering: ");
+@@ -6751,6 +6787,8 @@ SDValue AArch64TargetLowering::LowerOperation(SDValue Op,
+   default:
+     llvm_unreachable("unimplemented operand");
+     return SDValue();
++  case ISD::ADDRSPACECAST:
++    return LowerADDRSPACECAST(Op, DAG);
+   case ISD::BITCAST:
+     return LowerBITCAST(Op, DAG);
+   case ISD::GlobalAddress:
+@@ -22918,6 +22956,7 @@ static SDValue performSTORECombine(SDNode *N,
+   SDValue Ptr = ST->getBasePtr();
+   EVT ValueVT = Value.getValueType();
+ 
++
+   auto hasValidElementTypeForFPTruncStore = [](EVT VT) {
+     EVT EltVT = VT.getVectorElementType();
+     return EltVT == MVT::f32 || EltVT == MVT::f64;
+diff --git a/llvm/lib/Target/AArch64/AArch64TargetMachine.cpp b/llvm/lib/Target/AArch64/AArch64TargetMachine.cpp
+index bcd677310..a799dbc11 100644
+--- a/llvm/lib/Target/AArch64/AArch64TargetMachine.cpp
++++ b/llvm/lib/Target/AArch64/AArch64TargetMachine.cpp
+@@ -291,7 +291,10 @@ static std::string computeDataLayout(const Triple &TT,
+     return "e-m:w-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32";
+   std::string Endian = LittleEndian ? "e" : "E";
+   std::string Ptr32 = TT.getEnvironment() == Triple::GNUILP32 ? "-p:32:32" : "";
++  // p270/p271/p272 are the __ptr32 __sptr/__uptr and __ptr64 spaces, as on
++  // x86: a four-byte pointer the program stores, widened on use.
+   return Endian + "-m:e" + Ptr32 +
++         "-p270:32:32-p271:32:32-p272:64:64"
+          "-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32";
+ }
+ 
+diff --git a/llvm/lib/Target/AArch64/AArch64TargetMachine.h b/llvm/lib/Target/AArch64/AArch64TargetMachine.h
+index 1a470ca87..c0e68a4e4 100644
+--- a/llvm/lib/Target/AArch64/AArch64TargetMachine.h
++++ b/llvm/lib/Target/AArch64/AArch64TargetMachine.h
+@@ -65,7 +65,11 @@ public:
+ 
+   /// Returns true if a cast between SrcAS and DestAS is a noop.
+   bool isNoopAddrSpaceCast(unsigned SrcAS, unsigned DestAS) const override {
+-    // Addrspacecasts are always noops.
++    assert(SrcAS != DestAS && "Expected different address spaces!");
++    // A cast that changes the pointer's width is a real extend or truncate
++    // (the __ptr32 and __ptr64 spaces, 270-272), not a noop.
++    if (getPointerSize(SrcAS) != getPointerSize(DestAS))
++      return false;
+     return true;
+   }
+ 

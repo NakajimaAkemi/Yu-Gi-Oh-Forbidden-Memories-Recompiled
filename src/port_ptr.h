@@ -12,12 +12,18 @@
  * -fms-extensions) keeps the game's data at its retail addresses, so
  * structures and pinned globals must keep their 32-bit layout.
  *
- * x86-64 only: clang implements __ptr32 through the x86 address spaces, and
- * on AArch64 it parses and is ignored, with no "attribute ignored" warning --
+ * A stock clang implements __ptr32 through the x86 address spaces only: on
+ * AArch64 it parses and is ignored, with no "attribute ignored" warning, so
  * every G32 below would silently widen to 8 bytes and every guest structure's
- * layout would be wrong. The #error further down stops that build rather than
- * let it compile. Android is therefore 32-bit ARM, where the pointers are
- * already 4 bytes and none of this is needed (notes/android-build.md).
+ * layout would be wrong. The #error further down stops such a build rather
+ * than let it compile.
+ *
+ * MEMORIES_AARCH64_PTR32 says the compiler in use is one that does support it
+ * there. A patch that teaches clang's AArch64 target the same address spaces
+ * x86 has is tools/pc/android/llvm-aarch64-ptr32.patch; with it the game's
+ * structures lay out on arm64 exactly as they do in the ILP32 build. Only a
+ * build that has checked its compiler should define this -- the #error above
+ * is what catches everything else. See notes/android-build.md, "AArch64".
  *
  *   G32     follows the '*' of a pointer the game stores in memory: a
  *           structure or union member, or a global pinned to a retail
@@ -36,11 +42,13 @@
  *           `int` in a native LP64 build.
  */
 
-#if defined(MEMORIES_PC) && defined(__aarch64__)
-#error "no 32-bit guest pointer on AArch64: clang ignores __ptr32 there, so every G32 structure would be laid out wrong (notes/android-build.md)"
+#if defined(MEMORIES_PC) && defined(__aarch64__) && !defined(MEMORIES_AARCH64_PTR32)
+#error "this compiler has no 32-bit guest pointer on AArch64: it ignores __ptr32 there, so every G32 structure would be laid out wrong (notes/android-build.md)"
 #endif
 
-#if defined(MEMORIES_PC) && defined(__clang__) && defined(__x86_64__)
+#if defined(MEMORIES_PC) && defined(__clang__) && \
+    (defined(__x86_64__) || \
+     (defined(__aarch64__) && defined(MEMORIES_AARCH64_PTR32)))
 #define G32 __ptr32 __uptr
 #define CALL32(type, pointer) ((type)(pointer))
 #else
